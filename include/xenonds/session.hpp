@@ -26,6 +26,10 @@ public:
 
     Status initialize(const CoreConfig& config);
     Status load_rom(const std::uint8_t* data, std::size_t size, const std::string& source_path);
+    Status load_rom_header(const std::uint8_t* header_data,
+                           std::size_t header_size,
+                           std::size_t rom_size,
+                           const std::string& source_path);
     Status start();
     Status pause();
     Status reset();
@@ -37,6 +41,11 @@ public:
 
 private:
     Status fail(ErrorCode code, const std::string& message);
+    Status load_validated_rom(const std::uint8_t* data,
+                              std::size_t data_size,
+                              std::size_t rom_size,
+                              const std::string& source_path,
+                              const NdsHeader& header);
 
     CoreBackend* backend_;
     SessionState state_;
@@ -46,4 +55,3 @@ private:
 };
 
 } // namespace xenonds
-

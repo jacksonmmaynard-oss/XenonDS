@@ -1,5 +1,9 @@
 /build/
 /build-xenon/
+/platform/xenon/build/
+/platform/xenon/build-desmume/
+/platform/xenon/loader/build/
+/platform/xenon/release/
 /third_party/desmume/
 /third_party/libxenon/
 *.elf
@@ -8,4 +12,3 @@
 *.nds
 *.dsv
 *.sav
-

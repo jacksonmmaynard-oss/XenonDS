@@ -9,6 +9,8 @@
 
 namespace xenonds {
 
+static const std::size_t kNdsMinimumHeaderSize = 0x160;
+
 struct RomRegion {
     std::uint32_t offset;
     std::uint32_t entry_address;
@@ -38,5 +40,12 @@ struct NdsHeader {
 
 Status parse_nds_header(const std::uint8_t* rom, std::size_t rom_size, NdsHeader* output);
 
-} // namespace xenonds
+// Parses a header held in a small buffer while validating executable ranges
+// against the size of the complete ROM file. This keeps platform probes from
+// loading an entire image just to inspect its metadata.
+Status parse_nds_header_prefix(const std::uint8_t* header,
+                               std::size_t header_size,
+                               std::size_t rom_size,
+                               NdsHeader* output);
 
+} // namespace xenonds

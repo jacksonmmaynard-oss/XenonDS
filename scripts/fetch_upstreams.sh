@@ -24,5 +24,12 @@ fetch_repo() {
 fetch_repo "https://github.com/TASEmulators/desmume.git" "$third_party/desmume" "$desmume_commit"
 fetch_repo "https://github.com/X360Tools/libxenon.git" "$third_party/libxenon" "$libxenon_commit"
 
-printf 'Pinned upstream sources are ready in %s\n' "$third_party"
+desmume_patch="$project_root/patches/desmume-xenon.patch"
+if git -C "$third_party/desmume" apply --ignore-space-change --check "$desmume_patch"; then
+    git -C "$third_party/desmume" apply --ignore-space-change "$desmume_patch"
+elif ! git -C "$third_party/desmume" apply --ignore-space-change --reverse --check "$desmume_patch"; then
+    printf 'Unable to apply Xenon compatibility patch: %s\n' "$desmume_patch" >&2
+    exit 1
+fi
 
+printf 'Pinned upstream sources are ready in %s\n' "$third_party"

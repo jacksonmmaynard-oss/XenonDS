@@ -15,11 +15,12 @@
 
 ## Milestone 1: first hardware frame
 
-- [ ] Confirm the container-built probe on GitHub Actions
-- [ ] Boot it through XeLL on a real Xbox 360
-- [ ] Statically compile the required DeSmuME interpreter sources
+- [x] Boot it through XeLL on a real Xbox 360
+- [x] Record video, USB, controller, ATA, and FAT initialization results
+- [x] Discover and validate a Nintendo DS ROM header from FAT storage
+- [x] Statically compile the required DeSmuME interpreter sources
+- [x] Stage the large interpreter behind an on-screen progress loader
 - [ ] Display the first software-rendered DS frame
-- [ ] Map Xbox buttons and right-stick touch cursor
 
 ## Milestone 2: playable interpreter
 

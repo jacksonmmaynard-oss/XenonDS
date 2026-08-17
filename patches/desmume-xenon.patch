@@ -1,0 +1,440 @@
+diff --git a/desmume/src/NDSSystem.cpp b/desmume/src/NDSSystem.cpp
+index c5c7b421..79ef4d01 100755
+--- a/desmume/src/NDSSystem.cpp
++++ b/desmume/src/NDSSystem.cpp
+@@ -165,7 +165,11 @@ int NDS_Init()
+ 
+ 	//got to print this somewhere..
+ 	printf("%s\n", EMU_DESMUME_NAME_AND_VERSION());
++	#ifdef DESMUME_XENON
++	printf("[init 1/6] MMU and core globals ready\n");
++	#endif
+ 	
++	#ifndef DESMUME_XENON
+ 	{
+ 		char	buf[MAX_PATH];
+ 		memset(buf, 0, MAX_PATH);
+@@ -176,6 +180,9 @@ int NDS_Init()
+ 		//why is this done here? shitty engineering. not intended.
+ 		NDS_RunAdvansceneAutoImport();
+ 	}
++	#else
++	printf("[init 2/6] optional desktop game database disabled\n");
++	#endif
+ 	
+ 	armcpu_new(&NDS_ARM9,0);
+ 	armcpu_SetBaseMemoryInterface(&NDS_ARM9, &arm9_base_memory_iface);
+@@ -186,18 +193,33 @@ int NDS_Init()
+ 	armcpu_SetBaseMemoryInterface(&NDS_ARM7, &arm7_base_memory_iface);
+ 	armcpu_SetBaseMemoryInterfaceData(&NDS_ARM7, NULL);
+ 	armcpu_ResetMemoryInterfaceToBase(&NDS_ARM7);
++	#ifdef DESMUME_XENON
++	printf("[init 3/6] ARM7 and ARM9 interpreter state ready\n");
++	#endif
+ 	
+ 	delete GPU;
+ 	GPU = new GPUSubsystem;
++	#ifdef DESMUME_XENON
++	printf("[init 4/6] software GPU ready\n");
++	#endif
+ 	
+ 	if (SPU_Init(SNDCORE_DUMMY, 740) != 0)
+ 		return -1;
++	#ifdef DESMUME_XENON
++	printf("[init 5/6] dummy audio core ready\n");
++	#endif
+ 	
+ 	delete wifiHandler;
+ 	wifiHandler = new WifiHandler;
+ 
++	#ifndef DESMUME_XENON
+ 	cheats = new CHEATS();
+ 	cheatSearch = new CHEATSEARCH();
++	#else
++	cheats = NULL;
++	cheatSearch = NULL;
++	printf("[init 6/6] Wi-Fi stub ready; optional cheats disabled\n");
++	#endif
+ 
+ 	return 0;
+ }
+diff --git a/desmume/src/libretro-common/features/features_cpu.c b/desmume/src/libretro-common/features/features_cpu.c
+index e632a0a8..0d6ab084 100644
+--- a/desmume/src/libretro-common/features/features_cpu.c
++++ b/desmume/src/libretro-common/features/features_cpu.c
+@@ -34,6 +34,10 @@
+ #include <libretro.h>
+ #include <features/features_cpu.h>
+ 
++#ifdef DESMUME_XENON
++#include <ppc/timebase.h>
++#endif
++
+ #if defined(_WIN32) && !defined(_XBOX)
+ #include <windows.h>
+ #endif
+@@ -149,6 +153,8 @@ retro_perf_tick_t cpu_features_get_perf_counter(void)
+    tv_sec     = (long)((ularge.QuadPart - epoch) / 10000000L);
+    tv_usec    = (long)(system_time.wMilliseconds * 1000);
+    time_ticks = (1000000 * tv_sec + tv_usec);
++#elif defined(DESMUME_XENON)
++   time_ticks = mftb();
+ #elif defined(__linux__) || defined(__QNX__) || defined(__MACH__)
+    struct timespec tv = {0};
+    if (ra_clock_gettime(CLOCK_MONOTONIC, &tv) == 0)
+@@ -204,6 +210,8 @@ retro_time_t cpu_features_get_time_usec(void)
+    if (!QueryPerformanceCounter(&count))
+       return 0;
+    return count.QuadPart * 1000000 / freq.QuadPart;
++#elif defined(DESMUME_XENON)
++   return mftb() / (PPC_TIMEBASE_FREQ / INT64_C(1000000));
+ #elif defined(__CELLOS_LV2__)
+    return sys_time_get_system_time();
+ #elif defined(GEKKO)
+@@ -317,7 +325,7 @@ static void arm_enable_runfast_mode(void)
+ }
+ #endif
+ 
+-#if defined(__linux__) && !defined(CPU_X86)
++#if defined(__linux__) && !defined(CPU_X86) && !defined(DESMUME_XENON)
+ #if defined(__ARM_ARCH) && (__ARM_ARCH > 0)
+ #include <sys/auxv.h>
+ #endif
+@@ -473,6 +481,14 @@ static void cpulist_read_from(CpuList* list, const char* filename)
+ 
+ #endif
+ 
++#ifdef DESMUME_XENON
++static unsigned char check_arm_cpu_feature(const char* feature)
++{
++   (void)feature;
++   return 0;
++}
++#endif
++
+ /**
+  * cpu_features_get_core_amount:
+  *
+@@ -497,6 +513,8 @@ unsigned cpu_features_get_core_amount(void)
+    return 1;
+ #elif defined(WIIU)
+    return 3;
++#elif defined(DESMUME_XENON)
++   return 1;
+ #elif defined(_SC_NPROCESSORS_ONLN)
+    /* Linux, most UNIX-likes. */
+    long ret = sysconf(_SC_NPROCESSORS_ONLN);
+diff --git a/desmume/src/path.cpp b/desmume/src/path.cpp
+index 0757687e..34e5ae59 100644
+--- a/desmume/src/path.cpp
++++ b/desmume/src/path.cpp
+@@ -183,7 +183,7 @@ void PathInfo::init(const char *filename)
+ 	std::vector<std::string> parts = tokenize_str(filename,"|");
+ 	SetRomName(parts[parts.size()-1].c_str());
+ 	LoadModulePath();
+-#if !defined(WIN32) && !defined(DESMUME_COCOA)
++#if !defined(WIN32) && !defined(DESMUME_COCOA) && !defined(DESMUME_XENON)
+ 	ReadPathSettings();
+ #endif
+ 		
+@@ -210,6 +210,12 @@ void PathInfo::LoadModulePath()
+ 	{
+ 		strcpy(pathToModule, _hack_alternateModulePathUtf8.c_str());
+ 	}
++#elif defined(DESMUME_XENON)
++	std::string pathStr = Path::GetFileDirectoryPath(path);
++	if (!pathStr.empty()) pathStr += DIRECTORY_DELIMITER_CHAR;
++
++	strncpy(pathToModule, pathStr.c_str(), MAX_PATH - 1);
++	pathToModule[MAX_PATH - 1] = '\0';
+ #elif defined(DESMUME_COCOA)
+ 	std::string pathStr = Path::GetFileDirectoryPath(path);
+ 
+diff --git a/desmume/src/path.h b/desmume/src/path.h
+index 78b18992..918591e1 100644
+--- a/desmume/src/path.h
++++ b/desmume/src/path.h
+@@ -32,7 +32,7 @@
+ #define mkdir(A, B) mkdir(A)
+ #endif
+ 
+-#elif !defined(DESMUME_COCOA)
++#elif !defined(DESMUME_COCOA) && !defined(DESMUME_XENON)
+ 	#include <glib.h>
+ #endif /* HOST_WINDOWS */
+ 
+diff --git a/desmume/src/types.h b/desmume/src/types.h
+index 23c264e9..bd7baed9 100644
+--- a/desmume/src/types.h
++++ b/desmume/src/types.h
+@@ -56,7 +56,7 @@
+ // Our AltiVec code assumes that its being run on a big-endian system. While
+ // the ppcle and ppc64le architectures do exist, our AltiVec code does not
+ // support little-endian right now.
+-	#if defined(__ALTIVEC__) && defined(MSB_FIRST) && (MSB_FIRST > 0)
++	#if defined(__ALTIVEC__) && defined(MSB_FIRST) && (MSB_FIRST > 0) && !defined(DESMUME_XENON)
+ 		#define ENABLE_ALTIVEC
+ 	#endif
+ 
+diff --git a/desmume/src/utils/libfat/libfat.cpp b/desmume/src/utils/libfat/libfat.cpp
+index 957964d0..87061537 100644
+--- a/desmume/src/utils/libfat/libfat.cpp
++++ b/desmume/src/utils/libfat/libfat.cpp
+@@ -65,6 +65,9 @@ static const devoptab_t dotab_fat = {
+ 	_FAT_dirclose_r,
+ #ifndef LIBFAT_PC
+ 	_FAT_statvfs_r,
++#endif
++#ifdef DESMUME_XENON
++	NULL,
+ #endif
+ 	_FAT_ftruncate_r,
+ 	_FAT_fsync_r,
+diff --git a/desmume/src/utils/libfat/libfat_pc.h b/desmume/src/utils/libfat/libfat_pc.h
+index 6b513aef..bdef233d 100644
+--- a/desmume/src/utils/libfat/libfat_pc.h
++++ b/desmume/src/utils/libfat/libfat_pc.h
+@@ -44,9 +44,16 @@
+ 
+ #endif //_MSC_VER
+ 
+-struct _reent {
+-	intptr_t _errno;
+-};
++#ifdef DESMUME_XENON
++#include <sys/iosupport.h>
++#define GetDeviceOpTab desmume_GetDeviceOpTab
++#define fatMount desmume_fatMount
++#define fatMountSimple desmume_fatMountSimple
++devoptab_t* desmume_GetDeviceOpTab(const char* name);
++#else
++struct _reent {
++	intptr_t _errno;
++};
+ 
+ #ifdef __APPLE__
+ typedef __darwin_mode_t mode_t;
+@@ -96,7 +103,8 @@ struct devoptab_t {
+ };
+ 
+ 
+-devoptab_t* GetDeviceOpTab(const char* name);
++devoptab_t* GetDeviceOpTab(const char* name);
++#endif
+ 
+ #define _ATTR_WEAK_ 
+ 
+diff --git a/desmume/src/utils/task.cpp b/desmume/src/utils/task.cpp
+index d8dde983..0a7cf931 100644
+--- a/desmume/src/utils/task.cpp
++++ b/desmume/src/utils/task.cpp
+@@ -113,9 +113,16 @@ Task::Impl::~Impl()
+ 	scond_free(condWork);
+ }
+ 
+-void Task::Impl::start(bool spinlock, int threadPriority, const char *name)
+-{
+-	slock_lock(this->mutex);
++void Task::Impl::start(bool spinlock, int threadPriority, const char *name)
++{
++#ifdef DESMUME_XENON
++	(void)spinlock;
++	(void)threadPriority;
++	(void)name;
++	_isThreadRunning = true;
++	return;
++#else
++	slock_lock(this->mutex);
+ 	
+ 	if (this->_isThreadRunning) {
+ 		slock_unlock(this->mutex);
+@@ -146,12 +153,18 @@ void Task::Impl::start(bool spinlock, int threadPriority, const char *name)
+ 	}
+ #endif
+ 	
+-	slock_unlock(this->mutex);
+-}
+-
+-void Task::Impl::execute(const TWork &work, void *param)
+-{
+-	slock_lock(this->mutex);
++	slock_unlock(this->mutex);
++#endif
++}
++
++void Task::Impl::execute(const TWork &work, void *param)
++{
++#ifdef DESMUME_XENON
++	if ((work == NULL) || !this->_isThreadRunning) return;
++	this->ret = work(param);
++	return;
++#else
++	slock_lock(this->mutex);
+ 
+ 	if ((work == NULL) || (this->workFunc != NULL) || !this->_isThreadRunning)
+ 	{
+@@ -163,12 +176,16 @@ void Task::Impl::execute(const TWork &work, void *param)
+ 	this->workFuncParam = param;
+ 	scond_signal(this->condWork);
+ 
+-	slock_unlock(this->mutex);
+-}
++	slock_unlock(this->mutex);
++#endif
++}
+ 
+-void* Task::Impl::finish()
+-{
+-	void *returnValue = NULL;
++void* Task::Impl::finish()
++{
++#ifdef DESMUME_XENON
++	return this->ret;
++#else
++	void *returnValue = NULL;
+ 
+ 	slock_lock(this->mutex);
+ 
+@@ -186,12 +203,17 @@ void* Task::Impl::finish()
+ 
+ 	slock_unlock(this->mutex);
+ 
+-	return returnValue;
+-}
++	return returnValue;
++#endif
++}
+ 
+-void Task::Impl::shutdown()
+-{
+-	slock_lock(this->mutex);
++void Task::Impl::shutdown()
++{
++#ifdef DESMUME_XENON
++	this->_isThreadRunning = false;
++	return;
++#else
++	slock_lock(this->mutex);
+ 
+ 	if (!this->_isThreadRunning) {
+ 		slock_unlock(this->mutex);
+@@ -208,8 +230,9 @@ void Task::Impl::shutdown()
+ 
+ 	slock_lock(this->mutex);
+ 	this->_isThreadRunning = false;
+-	slock_unlock(this->mutex);
+-}
++	slock_unlock(this->mutex);
++#endif
++}
+ 
+ void Task::start(bool spinlock) { impl->start(spinlock, 0, NULL); }
+ void Task::start(bool spinlock, int threadPriority, const char *name) { impl->start(spinlock, threadPriority, name); }
+diff --git a/desmume/src/wifi.cpp b/desmume/src/wifi.cpp
+index 83153572..dea4373b 100644
+--- a/desmume/src/wifi.cpp
++++ b/desmume/src/wifi.cpp
+@@ -39,6 +39,40 @@
+ #define PCAP_DEVICE_NAME description
+ #else
+ #include <stddef.h>
++#ifdef DESMUME_XENON
++#include <lwip/inet.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/select.h>
++struct sockaddr
++{
++	unsigned short sa_family;
++	char sa_data[14];
++};
++typedef unsigned int socklen_t;
++#define socket_t    int
++#define sockaddr_t  struct sockaddr
++#define AF_INET      2
++#define SOCK_DGRAM   2
++#define SOL_SOCKET   0x0FFF
++#define SO_REUSEADDR 0x0004
++#define SO_REUSEPORT 0x0200
++#define SO_BROADCAST 0x0020
++static inline int xenon_wifi_socket(int, int, int) { return -1; }
++static inline int xenon_wifi_setsockopt(int, int, int, const char *, socklen_t) { return -1; }
++static inline int xenon_wifi_bind(int, const sockaddr_t *, socklen_t) { return -1; }
++static inline int xenon_wifi_close(int) { return 0; }
++static inline int xenon_wifi_sendto(int, const char *, size_t, int, const sockaddr_t *, socklen_t) { return -1; }
++static inline int xenon_wifi_recvfrom(int, char *, size_t, int, sockaddr_t *, socklen_t *) { return -1; }
++static inline int xenon_wifi_select(int, fd_set *, fd_set *, fd_set *, struct timeval *) { return 0; }
++#define socket      xenon_wifi_socket
++#define setsockopt  xenon_wifi_setsockopt
++#define bind        xenon_wifi_bind
++#define closesocket xenon_wifi_close
++#define sendto      xenon_wifi_sendto
++#define recvfrom    xenon_wifi_recvfrom
++#define select      xenon_wifi_select
++#else
+ #include <unistd.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -47,6 +81,7 @@
+ #define socket_t    int
+ #define sockaddr_t  struct sockaddr
+ #define closesocket close
++#endif
+ #define PCAP_DEVICE_NAME name
+ #endif
+ 
+@@ -67,7 +102,23 @@
+ #define WPCAP
+ #endif
+ 
++#ifdef DESMUME_XENON
++typedef unsigned char u_char;
++typedef struct pcap pcap_t;
++typedef struct pcap_if
++{
++	struct pcap_if *next;
++	char *name;
++	char *description;
++} pcap_if_t;
++typedef struct pcap_pkthdr
++{
++	unsigned int len;
++} pcap_pkthdr;
++typedef void (*pcap_handler)(u_char *, const pcap_pkthdr *, const u_char *);
++#else
+ #include <pcap.h>
++#endif
+ typedef struct pcap pcap_t;
+ 
+ //sometimes this isnt defined
+@@ -3224,7 +3275,7 @@ void DummyPCapInterface::breakloop(void* dev)
+ 	// Do nothing.
+ }
+ 
+-#ifndef HOST_WINDOWS
++#if !defined(HOST_WINDOWS) && !defined(DESMUME_XENON)
+ 
+ int POSIXPCapInterface::findalldevs(void** alldevs, char* errbuf)
+ {
+@@ -3805,7 +3856,7 @@ WifiHandler::WifiHandler()
+ 
+ 	_packetCaptureFile = NULL;
+ 
+-	#ifndef HOST_WINDOWS
++	#if !defined(HOST_WINDOWS) && !defined(DESMUME_XENON)
+ 	_pcap = new POSIXPCapInterface;
+ 	_isSocketsSupported = true;
+ 	#else
+diff --git a/desmume/src/wifi.h b/desmume/src/wifi.h
+index bed06f1e..189f1dfe 100644
+--- a/desmume/src/wifi.h
++++ b/desmume/src/wifi.h
+@@ -3260,7 +3260,7 @@ public:
+ 	virtual void breakloop(void *dev);
+ };
+ 
+-#ifndef HOST_WINDOWS
++#if !defined(HOST_WINDOWS) && !defined(DESMUME_XENON)
+ 
+ class POSIXPCapInterface : public ClientPCapInterface
+ {

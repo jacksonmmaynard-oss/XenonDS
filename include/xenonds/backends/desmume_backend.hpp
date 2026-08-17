@@ -24,7 +24,7 @@ public:
 private:
     bool initialized_;
     bool loaded_;
+    bool first_frame_;
 };
 
 } // namespace xenonds
-

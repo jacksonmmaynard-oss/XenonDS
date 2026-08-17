@@ -1,23 +1,26 @@
 # Contributing to XenonDS
 
-XenonDS is currently an engineering prototype. Small, measured changes are
-more useful than broad rewrites.
+Contributions are welcome through focused issues and pull requests.
 
-## Before opening a change
+## Development guidelines
 
-1. Build the host utilities and run `ctest --test-dir build --output-on-failure`.
-2. Keep platform-specific code behind the backend and platform boundaries.
-3. Do not commit ROMs, BIOS files, firmware, keys, Microsoft SDK material, or
-   other copyrighted console files.
-4. Record performance measurements with the console model, build revision,
-   test software, and measurement method.
+- Keep platform-specific code behind the backend and platform boundaries.
+- Include tests for portable core changes.
+- Record performance results with the console model, build revision, test
+  software, and measurement method.
+- Keep commits limited to one clear change where practical.
+- Do not commit ROMs, BIOS files, firmware, keys, Microsoft SDK material, or
+  other proprietary console files.
 
-## Near-term work
+## Validation
 
-- Complete the minimal DeSmuME interpreter source list for LibXenon.
-- Add an audio ring buffer behind a platform-neutral sink.
-- Add a right-stick touch cursor and configurable screen layout.
-- Profile the interpreter before designing the PowerPC dynamic recompiler.
+Run the host test suite before submitting a pull request:
 
-Tests should use synthetic headers or freely redistributable homebrew. Please
-do not upload commercial game images to issues or pull requests.
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Tests must use synthetic data or freely redistributable homebrew. Commercial
+game images must not be attached to issues or pull requests.

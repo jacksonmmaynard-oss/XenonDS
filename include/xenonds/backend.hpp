@@ -13,11 +13,13 @@ namespace xenonds {
 
 struct RomView {
     const std::uint8_t* data;
+    std::size_t data_size;
+    // Size of the complete file, which can exceed data_size for file-backed ROMs.
     std::size_t size;
     std::string source_path;
     NdsHeader header;
 
-    RomView() : data(0), size(0) {}
+    RomView() : data(0), data_size(0), size(0) {}
 };
 
 class CoreBackend {
@@ -34,4 +36,3 @@ public:
 };
 
 } // namespace xenonds
-

@@ -1,0 +1,64 @@
+name: Core CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  xenon-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build LibXenon runtime probe
+        run: >-
+          docker run --rm
+          -v "$GITHUB_WORKSPACE:/app"
+          -w /app/platform/xenon
+          free60/libxenon:latest
+          bash -lc make
+
+      - name: Upload XeLL executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenonds-runtime-probe
+          path: platform/xenon/xenonds-probe.elf32
+          if-no-files-found: error
+
+  xenon-desmume-checkpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build DeSmuME interpreter checkpoint
+        run: >-
+          docker run --rm
+          -v "$GITHUB_WORKSPACE:/app"
+          -w /app
+          free60/libxenon:latest
+          bash -lc "bash scripts/fetch_upstreams.sh && make -C platform/xenon WITH_DESMUME=1 && make -C platform/xenon/loader && mkdir -p platform/xenon/release/XenonDS && cp platform/xenon/loader/xenonds-loader.elf32 platform/xenon/release/xenon.elf && cp platform/xenon/xenonds-desmume.elf32 platform/xenon/release/XenonDS/xenonds-core.elf32 && cp platform/xenon/loader/USB_README.txt platform/xenon/release/README.txt"
+
+      - name: Upload XeLL executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenonds-desmume-staged-checkpoint
+          path: platform/xenon/release
+          if-no-files-found: error

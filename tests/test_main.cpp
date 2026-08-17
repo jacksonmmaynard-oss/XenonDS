@@ -107,6 +107,23 @@ void test_header_parser() {
     CHECK(status.code() == xenonds::ErrorCode::header_crc_mismatch);
 }
 
+void test_header_prefix_parser() {
+    const std::vector<std::uint8_t> rom = make_test_rom();
+    std::vector<std::uint8_t> header(rom.begin(),
+                                     rom.begin() + xenonds::kNdsMinimumHeaderSize);
+
+    xenonds::NdsHeader parsed;
+    xenonds::Status status = xenonds::parse_nds_header_prefix(
+        header.data(), header.size(), rom.size(), &parsed);
+    CHECK(status.ok());
+    CHECK(parsed.title == "XENONDS TEST");
+    CHECK(parsed.arm7.offset == 0x5000u);
+
+    status = xenonds::parse_nds_header_prefix(
+        header.data(), header.size() - 1, rom.size(), &parsed);
+    CHECK(status.code() == xenonds::ErrorCode::rom_too_small);
+}
+
 void test_homebrew_game_code() {
     std::vector<std::uint8_t> rom = make_test_rom();
     rom[0x0C] = '#';
@@ -151,6 +168,22 @@ void test_session_lifecycle() {
     CHECK(session.pause().ok());
     session.stop();
     CHECK(!backend.initialized);
+}
+
+void test_file_backed_session_load() {
+    const std::vector<std::uint8_t> rom = make_test_rom();
+    const std::vector<std::uint8_t> header(
+        rom.begin(), rom.begin() + xenonds::kNdsMinimumHeaderSize);
+    RecordingBackend backend;
+    xenonds::Session session(&backend);
+    xenonds::CoreConfig config;
+
+    CHECK(session.initialize(config).ok());
+    CHECK(session.load_rom_header(header.data(), header.size(), rom.size(),
+                                  "uda:/XenonDS/test.nds").ok());
+    CHECK(backend.loaded);
+    CHECK(session.rom_header().game_code == "XNDE");
+    session.stop();
 }
 
 void test_screen_layouts() {
@@ -228,9 +261,11 @@ void test_video_compositor() {
 int main() {
     test_crc_known_vector();
     test_header_parser();
+    test_header_prefix_parser();
     test_homebrew_game_code();
     test_region_bounds();
     test_session_lifecycle();
+    test_file_backed_session_load();
     test_screen_layouts();
     test_controller_mapper();
     test_video_compositor();

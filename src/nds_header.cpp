@@ -8,8 +8,6 @@
 namespace xenonds {
 namespace {
 
-static const std::size_t kMinimumHeaderSize = 0x160;
-
 std::uint16_t read_u16_le(const std::uint8_t* p) {
     return static_cast<std::uint16_t>(p[0]) |
            static_cast<std::uint16_t>(static_cast<std::uint16_t>(p[1]) << 8u);
@@ -48,7 +46,7 @@ RomRegion read_region(const std::uint8_t* p) {
 }
 
 bool region_fits(const RomRegion& region, std::size_t rom_size) {
-    if (region.size == 0 || region.offset < kMinimumHeaderSize) {
+    if (region.size == 0 || region.offset < kNdsMinimumHeaderSize) {
         return false;
     }
     const std::uint64_t end = static_cast<std::uint64_t>(region.offset) + region.size;
@@ -84,32 +82,39 @@ NdsHeader::NdsHeader()
       calculated_header_crc(0) {}
 
 Status parse_nds_header(const std::uint8_t* rom, std::size_t rom_size, NdsHeader* output) {
-    if (rom == 0 || output == 0) {
+    return parse_nds_header_prefix(rom, rom_size, rom_size, output);
+}
+
+Status parse_nds_header_prefix(const std::uint8_t* header,
+                               std::size_t header_size,
+                               std::size_t rom_size,
+                               NdsHeader* output) {
+    if (header == 0 || output == 0) {
         return Status(ErrorCode::invalid_argument, "ROM data and output header are required");
     }
-    if (rom_size < kMinimumHeaderSize) {
+    if (header_size < kNdsMinimumHeaderSize || rom_size < kNdsMinimumHeaderSize) {
         return Status(ErrorCode::rom_too_small, "File is smaller than the 0x160-byte Nintendo DS header");
     }
 
     NdsHeader parsed;
-    parsed.title = clean_ascii(rom + 0x00, 12);
-    parsed.game_code = clean_ascii(rom + 0x0C, 4);
-    parsed.maker_code = clean_ascii(rom + 0x10, 2);
-    parsed.unit_code = rom[0x12];
-    parsed.device_capacity = rom[0x14];
-    parsed.rom_version = rom[0x1E];
-    parsed.arm9 = read_region(rom + 0x20);
-    parsed.arm7 = read_region(rom + 0x30);
-    parsed.banner_offset = read_u32_le(rom + 0x68);
-    parsed.declared_rom_size = read_u32_le(rom + 0x80);
-    parsed.header_size = read_u32_le(rom + 0x84);
-    parsed.stored_header_crc = read_u16_le(rom + 0x15E);
-    parsed.calculated_header_crc = crc16_nintendo(rom, 0x15E);
+    parsed.title = clean_ascii(header + 0x00, 12);
+    parsed.game_code = clean_ascii(header + 0x0C, 4);
+    parsed.maker_code = clean_ascii(header + 0x10, 2);
+    parsed.unit_code = header[0x12];
+    parsed.device_capacity = header[0x14];
+    parsed.rom_version = header[0x1E];
+    parsed.arm9 = read_region(header + 0x20);
+    parsed.arm7 = read_region(header + 0x30);
+    parsed.banner_offset = read_u32_le(header + 0x68);
+    parsed.declared_rom_size = read_u32_le(header + 0x80);
+    parsed.header_size = read_u32_le(header + 0x84);
+    parsed.stored_header_crc = read_u16_le(header + 0x15E);
+    parsed.calculated_header_crc = crc16_nintendo(header, 0x15E);
 
     if (!valid_game_code(parsed.game_code)) {
         return Status(ErrorCode::invalid_header, "Nintendo DS game code is missing or invalid");
     }
-    if (parsed.header_size < kMinimumHeaderSize || parsed.header_size > rom_size) {
+    if (parsed.header_size < kNdsMinimumHeaderSize || parsed.header_size > rom_size) {
         return Status(ErrorCode::invalid_header, "Declared header size is outside the ROM image");
     }
     if (parsed.stored_header_crc != parsed.calculated_header_crc) {
