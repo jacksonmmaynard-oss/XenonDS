@@ -1,0 +1,11 @@
+/build/
+/build-xenon/
+/third_party/desmume/
+/third_party/libxenon/
+*.elf
+*.elf32
+*.map
+*.nds
+*.dsv
+*.sav
+
