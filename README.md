@@ -13,6 +13,13 @@ second Xbox hardware thread for framebuffer conversion.
 > 14.8 FPS in the current test scene. Audio, saves, a ROM browser, and broad
 > compatibility testing are not implemented yet.
 
+> **Project status:** Architecture transition. XenonDS v0.6.1 successfully
+> executes Nintendo DS software on real Xbox 360 hardware using the DeSmuME
+> interpreter, but profiling shows that this implementation cannot reach
+> full speed through frontend optimization alone. Development is now focused
+> on replacing the execution core while preserving the proven LibXenon
+> platform, input, storage, and video layers.
+
 ## What works
 
 - XeLL launch from FAT32 USB storage
