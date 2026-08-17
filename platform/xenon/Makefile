@@ -15,7 +15,7 @@ LDSCRIPT := $(PLATFORM_DIR)/app.lds
 
 ifeq ($(WITH_DESMUME),1)
 TARGET := xenonds-desmume
-BUILD := build-desmume
+BUILD := build-desmume-profile
 SOURCES := desmume/source
 CORE_CPPFILES := checksum.cpp controller_mapper.cpp nds_header.cpp session.cpp desmume_backend.cpp
 DESMUME_ROOT := $(PROJECT_ROOT)/third_party/desmume/desmume/src

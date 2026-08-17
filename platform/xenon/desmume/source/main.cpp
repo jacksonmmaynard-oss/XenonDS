@@ -21,6 +21,7 @@
 namespace {
 
 const unsigned long kTargetFrameMicroseconds = 16715;
+const unsigned int kProfileFrameCount = 4;
 
 xenonds::ControllerSnapshot snapshot_from_pad(const controller_data_s& pad) {
     xenonds::ControllerSnapshot snapshot;
@@ -93,7 +94,7 @@ int main() {
     xenon_ata_init();
     xenon_atapi_init();
 
-    std::printf("XenonDS DeSmuME interpreter checkpoint v0.3.7\n");
+    std::printf("XenonDS safe performance checkpoint v0.4.1\n");
     if (!xenonds::xenon::initialize_video_presenter()) {
         std::printf("FAILED: Xbox framebuffer information is invalid.\n");
         return 1;
@@ -165,7 +166,62 @@ int main() {
     xenonds::ControllerMapper mapper;
     controller_data_s pad;
 
-    // Show the already-completed first frame immediately. The presenter builds
+    // Measure a small representative sample on the console itself. Four
+    // frames keeps the wait reasonable even before optimization, while the
+    // separate stage counters distinguish ARM interpretation from input,
+    // framebuffer extraction, and Xbox presentation.
+    unsigned long core_total = 0;
+    unsigned long input_total = 0;
+    unsigned long arm_total = 0;
+    unsigned long copy_total = 0;
+    for (unsigned int sample = 0; sample < kProfileFrameCount; ++sample) {
+        const std::uint64_t core_start = mftb();
+        status = session.run_frame(input, &frame);
+        core_total += tb_diff_usec(mftb(), core_start);
+        if (!status.ok()) {
+            show_failure("performance profile", status);
+            return 1;
+        }
+        const xenonds::DesmumeFrameProfile& profile = backend.last_frame_profile();
+        input_total += profile.input_microseconds;
+        arm_total += profile.arm_microseconds;
+        copy_total += profile.copy_microseconds;
+    }
+
+    // Warm the full-frame path once, then time the normal dirty-tile path.
+    xenonds::xenon::present_ds_frame(frame, input.touch);
+    const std::uint64_t video_start = mftb();
+    for (unsigned int sample = 0; sample < kProfileFrameCount; ++sample) {
+        xenonds::xenon::present_ds_frame(frame, input.touch);
+    }
+    const unsigned long video_total = tb_diff_usec(mftb(), video_start);
+
+    const unsigned long core_average = core_total / kProfileFrameCount;
+    const unsigned long input_average = input_total / kProfileFrameCount;
+    const unsigned long arm_average = arm_total / kProfileFrameCount;
+    const unsigned long copy_average = copy_total / kProfileFrameCount;
+    const unsigned long video_average = video_total / kProfileFrameCount;
+    const unsigned long estimated_frame = core_average + video_average;
+    const unsigned long fps_tenths = estimated_frame == 0
+        ? 0
+        : 10000000ul / estimated_frame;
+
+    console_init();
+    std::printf("XenonDS v0.4.1 performance profile (%u frames)\n\n",
+                kProfileFrameCount);
+    std::printf("Input:       %8lu us\n", input_average);
+    std::printf("ARM cores:   %8lu us\n", arm_average);
+    std::printf("Frame copy:  %8lu us\n", copy_average);
+    std::printf("Core total:  %8lu us\n", core_average);
+    std::printf("Xbox video:  %8lu us\n", video_average);
+    std::printf("Estimated:   %8lu us  (%lu.%lu FPS)\n\n",
+                estimated_frame, fps_tenths / 10ul, fps_tenths % 10ul);
+    std::printf("Photograph these results for the next optimization pass.\n");
+    std::printf("A: run game    Guide: return to XeLL\n");
+    if (!wait_to_start()) {
+        return 0;
+    }
+    // Show the most recently profiled frame immediately. The presenter builds
     // a tiled frame off-screen before publishing it to avoid visible sweeps.
     xenonds::xenon::present_ds_frame(frame, input.touch);
 

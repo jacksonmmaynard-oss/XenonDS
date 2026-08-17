@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <cstdio>
 
+#ifdef XENON
+#include <ppc/timebase.h>
+#endif
+
 namespace xenonds {
 namespace {
 
@@ -67,6 +71,11 @@ Status DesmumeBackend::run_frame(const InputState& input, FrameOutput* output) {
         return Status(ErrorCode::invalid_state, "A loaded ROM and frame output are required");
     }
 
+    last_frame_profile_ = DesmumeFrameProfile();
+#ifdef XENON
+    std::uint64_t stage_start = mftb();
+#endif
+
     if (first_frame_) {
         std::printf("[frame 1/5] applying raw controller state\n");
     }
@@ -100,10 +109,22 @@ Status DesmumeBackend::run_frame(const InputState& input, FrameOutput* output) {
     NDS_beginProcessingInput();
     NDS_endProcessingInput();
 
+#ifdef XENON
+    std::uint64_t stage_end = mftb();
+    last_frame_profile_.input_microseconds = tb_diff_usec(stage_end, stage_start);
+    stage_start = stage_end;
+#endif
+
     if (first_frame_) {
         std::printf("[frame 3/5] running ARM interpreters\n");
     }
     NDS_exec<false>();
+
+#ifdef XENON
+    stage_end = mftb();
+    last_frame_profile_.arm_microseconds = tb_diff_usec(stage_end, stage_start);
+    stage_start = stage_end;
+#endif
 
     if (first_frame_) {
         std::printf("[frame 4/5] interpreter returned; reading video\n");
@@ -121,11 +142,19 @@ Status DesmumeBackend::run_frame(const InputState& input, FrameOutput* output) {
     // Audio wiring is intentionally deferred until the LibXenon sound ring
     // buffer is in place. The emulation core still advances its SPU per frame.
     output->audio.clear();
+#ifdef XENON
+    stage_end = mftb();
+    last_frame_profile_.copy_microseconds = tb_diff_usec(stage_end, stage_start);
+#endif
     if (first_frame_) {
         std::printf("[frame 5/5] first framebuffer copied\n");
         first_frame_ = false;
     }
     return Status::Ok();
+}
+
+const DesmumeFrameProfile& DesmumeBackend::last_frame_profile() const {
+    return last_frame_profile_;
 }
 
 void DesmumeBackend::unload_rom() {

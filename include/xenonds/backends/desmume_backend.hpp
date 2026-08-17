@@ -5,6 +5,15 @@
 
 namespace xenonds {
 
+struct DesmumeFrameProfile {
+    unsigned long input_microseconds;
+    unsigned long arm_microseconds;
+    unsigned long copy_microseconds;
+
+    DesmumeFrameProfile()
+        : input_microseconds(0), arm_microseconds(0), copy_microseconds(0) {}
+};
+
 // First integration adapter for the upstream DeSmuME core. The host tests do
 // not build this target yet; it is enabled with XENONDS_WITH_DESMUME once the
 // pinned upstream source and LibXenon platform layer are present.
@@ -21,10 +30,13 @@ public:
     virtual void unload_rom();
     virtual void shutdown();
 
+    const DesmumeFrameProfile& last_frame_profile() const;
+
 private:
     bool initialized_;
     bool loaded_;
     bool first_frame_;
+    DesmumeFrameProfile last_frame_profile_;
 };
 
 } // namespace xenonds

@@ -8,9 +8,10 @@ XenonDS is an open-source Nintendo DS emulator port for Xbox 360 homebrew.
 It combines a portable frontend with LibXenon platform support and the
 DeSmuME emulation core.
 
-> **Project status:** Experimental. The v0.3 interpreter checkpoint builds a
-> real LibXenon executable and attempts the first DeSmuME-rendered frame on an
-> Xbox 360. It is not yet a playable emulator release.
+> **Project status:** Experimental. The v0.4 performance checkpoint boots a
+> commercial DS game through the DeSmuME interpreter and renders playable
+> frames on real Xbox 360 hardware. Performance, audio, and compatibility are
+> still early and it is not yet a general release.
 
 ## Implemented
 
@@ -26,6 +27,7 @@ DeSmuME emulation core.
 - On-console FAT device discovery and Nintendo DS ROM-header validation
 - Statically linked DeSmuME interpreter checkpoint for LibXenon
 - Direct software-framebuffer output for the two Nintendo DS screens
+- On-console emulation and video-stage profiler
 
 ## Build and test
 
@@ -64,12 +66,13 @@ Running the resulting `.elf32` file requires a homebrew-capable Xbox 360 and
 XeLL. Copy only a legally dumped `.nds` image to the USB drive; this milestone
 inspects metadata and does not execute the game yet.
 
-## Experimental DeSmuME checkpoint
+## Experimental DeSmuME performance checkpoint
 
-The v0.3.7 build uses a small staged loader plus the pinned DeSmuME interpreter
+The v0.4.1 build uses a small staged loader plus the pinned DeSmuME interpreter
 core. The loader shows file-read progress and a moving memory-preparation bar,
-then the core loads the first legal `.nds` image found on FAT storage, executes
-a software frame, and sends both DS screens directly to the Xbox framebuffer.
+then the core loads the first legal `.nds` image found on FAT storage and runs
+it on the Xbox 360. Before gameplay it reports separate input, ARM interpreter,
+frame-copy, and Xbox-video timings measured on the console.
 
 ```powershell
 ./scripts/build_xenon_desmume.ps1
@@ -78,7 +81,8 @@ a software frame, and sends both DS screens directly to the Xbox framebuffer.
 The USB-ready output is `platform/xenon/release/`: `xenon.elf` belongs in the
 drive root and `XenonDS/xenonds-core.elf32` stays inside the included folder.
 This checkpoint uses the scalar interpreter and has no audio, save persistence,
-or ROM browser yet. See [Xbox 360 runtime testing](docs/XBOX_TESTING.md) for the
+or ROM browser yet. It keeps the proven v0.3.7 framebuffer path while measuring
+where each frame spends its time. See [Xbox 360 runtime testing](docs/XBOX_TESTING.md) for the
 complete layout and expected on-screen result.
 
 ## Upstream dependencies

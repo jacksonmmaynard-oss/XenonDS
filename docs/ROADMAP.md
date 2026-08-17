@@ -20,7 +20,7 @@
 - [x] Discover and validate a Nintendo DS ROM header from FAT storage
 - [x] Statically compile the required DeSmuME interpreter sources
 - [x] Stage the large interpreter behind an on-screen progress loader
-- [ ] Display the first software-rendered DS frame
+- [x] Display the first software-rendered DS frame
 
 ## Milestone 2: playable interpreter
 
@@ -28,7 +28,7 @@
 - [ ] Battery-backed `.dsv` saves
 - [ ] ROM browser and clean error screen
 - [ ] Frame pacing and configurable frame skip
-- [ ] Performance counters per emulated subsystem
+- [x] Performance counters for input, ARM execution, frame copy, and Xbox video
 
 ## Milestone 3: Pokémon Black/White target
 

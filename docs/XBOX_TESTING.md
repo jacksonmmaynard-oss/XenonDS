@@ -1,9 +1,9 @@
 # Xbox 360 runtime test
 
 XenonDS currently provides two Xbox executables: the v0.2 hardware probe and
-the v0.3 experimental DeSmuME interpreter checkpoint. The probe only validates
-the ROM header. The interpreter build attempts to execute and display the first
-software-rendered Nintendo DS frame.
+the v0.4.1 experimental DeSmuME performance checkpoint. The probe only validates
+the ROM header. The interpreter build executes and displays Nintendo DS frames
+and measures its main frame stages on real hardware.
 
 ## Prepare the USB drive
 
@@ -28,7 +28,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 The output is `platform\xenon\xenonds-probe.elf32`.
 
-To build the v0.3 interpreter checkpoint instead:
+To build the v0.4.1 performance checkpoint instead:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -62,20 +62,21 @@ A successful test prints:
 Press **A** to rescan after changing storage. Press the **Guide** button to
 return to XeLL.
 
-## Expected v0.3 interpreter result
+## Expected v0.4.1 interpreter result
 
 Boot XeLL with the staged `xenon.elf` in the USB root, then press **A** at the
 loader prompt. It reports FAT and core discovery, prints core-read percentages,
 and then shows a memory-preparation bar at the bottom of the screen. After the
 handoff, a successful first-frame test
 prints `PASS: first DeSmuME software frame completed` followed by a frame hash.
-Press **A** to display the DS screens and continue emulation. Press the **Guide**
-button to exit.
+Press **A** to run the four-frame profile. Photograph the resulting input, ARM,
+frame-copy, core-total, and Xbox-video timings, then press **A** again to display
+the DS screens and continue emulation. Press the **Guide** button to exit.
 
-The v0.3 checkpoint deliberately uses DeSmuME's scalar interpreter. It has no
+The v0.4.1 checkpoint deliberately uses DeSmuME's scalar interpreter. It has no
 audio, persistent saves, ROM browser, or performance guarantees yet. If it
-stops or displays incorrectly, photograph the complete on-screen message and
-include the reported frame hash when filing an issue.
+stops or displays incorrectly, photograph the complete on-screen message,
+profile, and frame hash when filing an issue.
 
 Do not publish ROM images, console keys, BIOS/firmware dumps, or NAND files in
 the repository or in bug reports.

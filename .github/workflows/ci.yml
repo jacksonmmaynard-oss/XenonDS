@@ -59,6 +59,15 @@ jobs:
       - name: Upload XeLL executable
         uses: actions/upload-artifact@v4
         with:
-          name: xenonds-desmume-staged-checkpoint
+          name: XenonDS-v0.4.1-safe-profile
           path: platform/xenon/release
+          if-no-files-found: error
+
+      - name: Upload Xenon debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: XenonDS-v0.4.1-symbols
+          path: |
+            platform/xenon/xenonds-desmume.elf
+            platform/xenon/build-desmume-profile/.map
           if-no-files-found: error
