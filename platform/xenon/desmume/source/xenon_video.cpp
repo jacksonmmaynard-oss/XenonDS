@@ -9,6 +9,7 @@
 
 extern "C" {
 #include <ppc/cache.h>
+#include <xenon_soc/xenon_power.h>
 }
 
 namespace xenonds {
@@ -25,6 +26,11 @@ struct Framebuffer {
 
 Framebuffer cached_output = {};
 bool output_is_initialized = false;
+const int kVideoThread = 2; // A different physical core from the main thread.
+alignas(16) unsigned char video_worker_stack[64 * 1024];
+FrameOutput queued_frame;
+TouchState queued_touch;
+std::vector<std::uint32_t> staging;
 
 std::size_t tiled_index(int x, int y, int width) {
     return static_cast<std::size_t>(
@@ -89,6 +95,43 @@ void draw_touch_cursor(const Framebuffer& framebuffer,
     }
 }
 
+void present_ds_frame_immediate(const std::uint16_t* source,
+                                const TouchState& touch) {
+    const Framebuffer output = cached_output;
+    std::fill(staging.begin(), staging.end(), 0x090B1000u);
+
+    Framebuffer framebuffer = output;
+    framebuffer.pixels = staging.data();
+
+    const int gap = 16;
+    const int maximum_scale_x = (framebuffer.visible_width - gap) /
+                                static_cast<int>(kScreenWidth * 2);
+    const int maximum_scale_y = framebuffer.visible_height /
+                                static_cast<int>(kScreenHeight);
+    const int scale = std::max(1, std::min(3, std::min(maximum_scale_x, maximum_scale_y)));
+    const int total_width = static_cast<int>(kScreenWidth * 2) * scale + gap;
+    const int total_height = static_cast<int>(kScreenHeight) * scale;
+    const int top_x = (framebuffer.visible_width - total_width) / 2;
+    const int top_y = (framebuffer.visible_height - total_height) / 2;
+    const int touch_x = top_x + static_cast<int>(kScreenWidth) * scale + gap;
+
+    draw_screen(framebuffer, source, top_x, top_y, scale);
+    draw_screen(framebuffer, source + kScreenWidth * kScreenHeight,
+                touch_x, top_y, scale);
+    draw_touch_cursor(framebuffer, touch, touch_x, top_y, scale);
+
+    const std::size_t byte_count = staging.size() * sizeof(std::uint32_t);
+    std::memcpy(output.pixels, staging.data(), byte_count);
+    memdcbst(output.pixels, static_cast<int>(byte_count));
+}
+
+extern "C" void xenonds_video_worker() {
+    // The main thread does not touch queued_frame until this task returns.
+    __sync_synchronize();
+    present_ds_frame_immediate(queued_frame.pixels.data(), queued_touch);
+    __sync_synchronize();
+}
+
 } // namespace
 
 bool initialize_video_presenter() {
@@ -110,8 +153,21 @@ bool initialize_video_presenter() {
     cached_output.visible_height = static_cast<int>(height);
     cached_output.padded_width = (cached_output.visible_width + 31) & ~31;
     cached_output.padded_height = (cached_output.visible_height + 31) & ~31;
+    staging.resize(static_cast<std::size_t>(cached_output.padded_width) *
+                   cached_output.padded_height);
     output_is_initialized = true;
     return true;
+}
+
+void wait_for_video_presenter() {
+    if (!output_is_initialized) {
+        return;
+    }
+    while (xenon_is_thread_task_running(kVideoThread) != 0) {
+        // A frame conversion is only ~7 ms and normally completes while the
+        // next DS frame is executing on the main core.
+    }
+    __sync_synchronize();
 }
 
 void present_ds_frame(const FrameOutput& frame, const TouchState& touch) {
@@ -119,39 +175,17 @@ void present_ds_frame(const FrameOutput& frame, const TouchState& touch) {
         return;
     }
 
-    const Framebuffer output = cached_output;
-    const std::size_t pixel_count =
-        static_cast<std::size_t>(output.padded_width) * output.padded_height;
-    static std::vector<std::uint32_t> staging;
-    if (staging.size() != pixel_count) {
-        staging.resize(pixel_count);
+    wait_for_video_presenter();
+    std::memcpy(queued_frame.pixels.data(), frame.pixels.data(),
+                kCombinedPixelCount * sizeof(std::uint16_t));
+    queued_touch = touch;
+    __sync_synchronize();
+
+    void* stack_top = video_worker_stack + sizeof(video_worker_stack) - 256;
+    while (xenon_run_thread_task(
+               kVideoThread, stack_top,
+               reinterpret_cast<void*>(&xenonds_video_worker)) != 0) {
     }
-    std::fill(staging.begin(), staging.end(), 0x090B1000u);
-
-    Framebuffer framebuffer = output;
-    framebuffer.pixels = staging.data();
-
-    const int gap = 16;
-    const int maximum_scale_x = (framebuffer.visible_width - gap) /
-                                static_cast<int>(kScreenWidth * 2);
-    const int maximum_scale_y = framebuffer.visible_height /
-                                static_cast<int>(kScreenHeight);
-    const int scale = std::max(1, std::min(3, std::min(maximum_scale_x, maximum_scale_y)));
-    const int total_width = static_cast<int>(kScreenWidth * 2) * scale + gap;
-    const int total_height = static_cast<int>(kScreenHeight) * scale;
-    const int top_x = (framebuffer.visible_width - total_width) / 2;
-    const int top_y = (framebuffer.visible_height - total_height) / 2;
-    const int touch_x = top_x + static_cast<int>(kScreenWidth) * scale + gap;
-
-    draw_screen(framebuffer, frame.pixels.data(), top_x, top_y, scale);
-    draw_screen(framebuffer,
-                frame.pixels.data() + kScreenWidth * kScreenHeight,
-                touch_x, top_y, scale);
-    draw_touch_cursor(framebuffer, touch, touch_x, top_y, scale);
-
-    const std::size_t byte_count = pixel_count * sizeof(std::uint32_t);
-    std::memcpy(output.pixels, staging.data(), byte_count);
-    memdcbst(output.pixels, static_cast<int>(byte_count));
 }
 
 } // namespace xenon

@@ -2,8 +2,10 @@
 /build-xenon/
 /platform/xenon/build/
 /platform/xenon/build-desmume/
+/platform/xenon/build-desmume-*/
 /platform/xenon/loader/build/
 /platform/xenon/release/
+/deliverables/
 /third_party/desmume/
 /third_party/libxenon/
 *.elf

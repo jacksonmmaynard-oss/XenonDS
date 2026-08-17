@@ -15,13 +15,14 @@
 #include <xenon_soc/xenon_power.h>
 #include <xenos/xenos.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
 namespace {
 
 const unsigned long kTargetFrameMicroseconds = 16715;
-const unsigned int kProfileFrameCount = 4;
+const unsigned int kProfileFrameCount = 30;
 
 xenonds::ControllerSnapshot snapshot_from_pad(const controller_data_s& pad) {
     xenonds::ControllerSnapshot snapshot;
@@ -94,7 +95,7 @@ int main() {
     xenon_ata_init();
     xenon_atapi_init();
 
-    std::printf("XenonDS safe performance checkpoint v0.4.1\n");
+    std::printf("XenonDS fast-timing pipeline optimization v0.6.1\n");
     if (!xenonds::xenon::initialize_video_presenter()) {
         std::printf("FAILED: Xbox framebuffer information is invalid.\n");
         return 1;
@@ -166,10 +167,9 @@ int main() {
     xenonds::ControllerMapper mapper;
     controller_data_s pad;
 
-    // Measure a small representative sample on the console itself. Four
-    // frames keeps the wait reasonable even before optimization, while the
-    // separate stage counters distinguish ARM interpretation from input,
-    // framebuffer extraction, and Xbox presentation.
+    // Measure enough frames to smooth out scheduler and game-startup noise.
+    // The older four-frame sample could move by several tenths of an FPS from
+    // one boot to another, which was too noisy for optimization decisions.
     unsigned long core_total = 0;
     unsigned long input_total = 0;
     unsigned long arm_total = 0;
@@ -188,12 +188,35 @@ int main() {
         copy_total += profile.copy_microseconds;
     }
 
+    // DeSmuME can omit its 2D/3D output while continuing to execute both DS
+    // CPUs and hardware. Compare that mode with normal frames to isolate the
+    // software-renderer share without placing timers inside the hot loop.
+    backend.request_frame_skip();
+    status = session.run_frame(input, &frame);
+    if (!status.ok()) {
+        show_failure("frame-skip profile warmup", status);
+        return 1;
+    }
+    unsigned long skipped_core_total = 0;
+    for (unsigned int sample = 0; sample < kProfileFrameCount; ++sample) {
+        backend.request_frame_skip();
+        const std::uint64_t skipped_start = mftb();
+        status = session.run_frame(input, &frame);
+        skipped_core_total += tb_diff_usec(mftb(), skipped_start);
+        if (!status.ok()) {
+            show_failure("frame-skip profile", status);
+            return 1;
+        }
+    }
+    backend.cancel_frame_skip();
+
     // Warm the full-frame path once, then time the normal dirty-tile path.
     xenonds::xenon::present_ds_frame(frame, input.touch);
     const std::uint64_t video_start = mftb();
     for (unsigned int sample = 0; sample < kProfileFrameCount; ++sample) {
         xenonds::xenon::present_ds_frame(frame, input.touch);
     }
+    xenonds::xenon::wait_for_video_presenter();
     const unsigned long video_total = tb_diff_usec(mftb(), video_start);
 
     const unsigned long core_average = core_total / kProfileFrameCount;
@@ -201,20 +224,31 @@ int main() {
     const unsigned long arm_average = arm_total / kProfileFrameCount;
     const unsigned long copy_average = copy_total / kProfileFrameCount;
     const unsigned long video_average = video_total / kProfileFrameCount;
-    const unsigned long estimated_frame = core_average + video_average;
+    const unsigned long skipped_core_average = skipped_core_total / kProfileFrameCount;
+    const unsigned long render_average = core_average > skipped_core_average
+        ? core_average - skipped_core_average
+        : 0;
+    // Presentation runs on physical core 1 while the next DS frame runs on
+    // physical core 0, so steady-state throughput is the slower stage rather
+    // than their serial sum.
+    const unsigned long serial_frame = core_average + video_average;
+    const unsigned long estimated_frame = std::max(core_average, video_average);
     const unsigned long fps_tenths = estimated_frame == 0
         ? 0
         : 10000000ul / estimated_frame;
 
     console_init();
-    std::printf("XenonDS v0.4.1 performance profile (%u frames)\n\n",
+    std::printf("XenonDS v0.6.1 fast-timing pipeline profile (%u frames)\n\n",
                 kProfileFrameCount);
     std::printf("Input:       %8lu us\n", input_average);
-    std::printf("ARM cores:   %8lu us\n", arm_average);
+    std::printf("NDS execute: %8lu us\n", arm_average);
     std::printf("Frame copy:  %8lu us\n", copy_average);
-    std::printf("Core total:  %8lu us\n", core_average);
+    std::printf("Normal core: %8lu us\n", core_average);
+    std::printf("No-render:   %8lu us\n", skipped_core_average);
+    std::printf("DS renderer: %8lu us\n", render_average);
     std::printf("Xbox video:  %8lu us\n", video_average);
-    std::printf("Estimated:   %8lu us  (%lu.%lu FPS)\n\n",
+    std::printf("Serial total:%8lu us\n", serial_frame);
+    std::printf("Pipelined:   %8lu us  (%lu.%lu FPS)\n\n",
                 estimated_frame, fps_tenths / 10ul, fps_tenths % 10ul);
     std::printf("Photograph these results for the next optimization pass.\n");
     std::printf("A: run game    Guide: return to XeLL\n");
@@ -231,6 +265,7 @@ int main() {
         std::memset(&pad, 0, sizeof(pad));
         get_controller_data(&pad, 0);
         if (pad.logo) {
+            xenonds::xenon::wait_for_video_presenter();
             return 0;
         }
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 #include "xenonds/checksum.hpp"
 
 namespace xenonds {
@@ -25,4 +25,3 @@ std::uint16_t crc16_nintendo(const std::uint8_t* data,
 }
 
 } // namespace xenonds
-

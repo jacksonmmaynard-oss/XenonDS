@@ -290,7 +290,7 @@ int xenonds_run_payload(const char* path) {
     }
 
     printf("Core ELF validation: PASS\n");
-    printf("Stage 3/3: preparing 99 MB DeSmuME runtime memory.\n");
+    printf("Stage 3/3: preparing emulator code and runtime memory.\n");
     printf("The progress bar at the bottom should continue moving.\n");
     printf("Do not turn off the Xbox during this stage.\n");
 

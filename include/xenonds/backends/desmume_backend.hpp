@@ -31,6 +31,8 @@ public:
     virtual void shutdown();
 
     const DesmumeFrameProfile& last_frame_profile() const;
+    void request_frame_skip();
+    void cancel_frame_skip();
 
 private:
     bool initialized_;

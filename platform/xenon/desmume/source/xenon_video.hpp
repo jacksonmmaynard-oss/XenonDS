@@ -8,6 +8,7 @@ namespace xenon {
 
 bool initialize_video_presenter();
 void present_ds_frame(const FrameOutput& frame, const TouchState& touch);
+void wait_for_video_presenter();
 
 } // namespace xenon
 } // namespace xenonds

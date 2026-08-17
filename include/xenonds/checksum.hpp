@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
 #include <cstddef>
@@ -11,4 +11,3 @@ std::uint16_t crc16_nintendo(const std::uint8_t* data,
                              std::uint16_t seed = 0xFFFFu);
 
 } // namespace xenonds
-

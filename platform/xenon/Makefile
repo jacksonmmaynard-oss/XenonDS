@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-only
+# SPDX-License-Identifier: GPL-2.0-or-later
 .SUFFIXES:
 .DEFAULT_GOAL := all
 
@@ -15,7 +15,7 @@ LDSCRIPT := $(PLATFORM_DIR)/app.lds
 
 ifeq ($(WITH_DESMUME),1)
 TARGET := xenonds-desmume
-BUILD := build-desmume-profile
+BUILD := build-desmume-fasttiming-o2
 SOURCES := desmume/source
 CORE_CPPFILES := checksum.cpp controller_mapper.cpp nds_header.cpp session.cpp desmume_backend.cpp
 DESMUME_ROOT := $(PROJECT_ROOT)/third_party/desmume/desmume/src
@@ -24,7 +24,7 @@ DESMUME_CPP_OFILES := $(addprefix desmume/,$(DESMUME_CPP_SOURCES:.cpp=.o))
 DESMUME_C_OFILES := $(addprefix desmume/,$(DESMUME_C_SOURCES:.c=.o))
 DESMUME_OFILES := $(DESMUME_CPP_OFILES) $(DESMUME_C_OFILES)
 DESMUME_LIBRARY := desmume/libdesmume.a
-DESMUME_DEFINES := -DMSB_FIRST=1 -DHOST_32=1 -DTARGET_INTERFACE=1 -DDESMUME_XENON=1
+DESMUME_DEFINES := -DMSB_FIRST=1 -DHOST_32=1 -DDESMUME_XENON=1
 DESMUME_CXXFLAGS :=
 else
 TARGET := xenonds-probe

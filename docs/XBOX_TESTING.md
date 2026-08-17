@@ -1,41 +1,13 @@
-# Xbox 360 runtime test
+# Xbox 360 testing
 
-XenonDS currently provides two Xbox executables: the v0.2 hardware probe and
-the v0.4.1 experimental DeSmuME performance checkpoint. The probe only validates
-the ROM header. The interpreter build executes and displays Nintendo DS frames
-and measures its main frame stages on real hardware.
+## Requirements
 
-## Prepare the USB drive
+- JTAG or RGH Xbox 360 capable of booting XeLL
+- FAT32 USB drive
+- v0.6.1 runtime package
+- one legally dumped Nintendo DS ROM
 
-1. Use a FAT32-formatted USB drive.
-2. Create a folder named `XenonDS`.
-3. Copy one legally dumped `.nds` image into that folder.
-4. For the interpreter checkpoint, copy `xenon.elf` to the drive root and
-   `xenonds-core.elf32` into the `XenonDS` folder.
-
-The probe scans every FAT device reported by LibXenon. On each device it checks
-`XenonDS/`, `xenonds/`, and then the drive root, selecting the first valid
-filename ending in `.nds`.
-
-## Build
-
-From PowerShell in the repository root:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\build_xenon_probe.ps1
-```
-
-The output is `platform\xenon\xenonds-probe.elf32`.
-
-To build the v0.4.1 performance checkpoint instead:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\build_xenon_desmume.ps1
-```
-
-Its USB-ready output is `platform\xenon\release` with this layout:
+## USB layout
 
 ```text
 xenon.elf
@@ -44,39 +16,17 @@ XenonDS/
   game.nds
 ```
 
-GitHub Actions also builds the same file on every push to `main` and every pull
-request. Open the successful **Core CI** run and download the
-`xenonds-runtime-probe` artifact if you prefer not to build locally.
+Boot XeLL with the USB drive connected. Press **A** at the staged-loader prompt.
+The core reads the ROM, executes a 30-frame performance sample, and displays
+the timing result. Press **A** again to enter the game. Press **Guide** to leave.
 
-## Expected result
+The Xbox face buttons map by physical position: Xbox A/B/X/Y become DS
+B/A/Y/X. The D-pad, bumpers, Menu, and View map to the DS D-pad, L/R, Start,
+and Select. The right stick controls the touch cursor and the right trigger
+touches the screen.
 
-A successful test prints:
+Current limitations include low performance, no audio, no persistent saves,
+no save states, no ROM browser, and limited game testing.
 
-- `FAT: OK`
-- the mounted device being scanned
-- ROM title, game code, maker, version, and file size
-- matching header CRC
-- ARM9 and ARM7 offsets, RAM addresses, and sizes
-- `PASS: portable XenonDS ROM parser is running on Xbox 360.`
-
-Press **A** to rescan after changing storage. Press the **Guide** button to
-return to XeLL.
-
-## Expected v0.4.1 interpreter result
-
-Boot XeLL with the staged `xenon.elf` in the USB root, then press **A** at the
-loader prompt. It reports FAT and core discovery, prints core-read percentages,
-and then shows a memory-preparation bar at the bottom of the screen. After the
-handoff, a successful first-frame test
-prints `PASS: first DeSmuME software frame completed` followed by a frame hash.
-Press **A** to run the four-frame profile. Photograph the resulting input, ARM,
-frame-copy, core-total, and Xbox-video timings, then press **A** again to display
-the DS screens and continue emulation. Press the **Guide** button to exit.
-
-The v0.4.1 checkpoint deliberately uses DeSmuME's scalar interpreter. It has no
-audio, persistent saves, ROM browser, or performance guarantees yet. If it
-stops or displays incorrectly, photograph the complete on-screen message,
-profile, and frame hash when filing an issue.
-
-Do not publish ROM images, console keys, BIOS/firmware dumps, or NAND files in
-the repository or in bug reports.
+Never attach ROMs, BIOS or firmware dumps, console keys, CPU/DVD keys, or NAND
+files to releases or bug reports.

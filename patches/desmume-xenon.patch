@@ -1,3 +1,106 @@
+diff --git a/desmume/src/MMU.h b/desmume/src/MMU.h
+index 261247be..d2c0e291 100644
+--- a/desmume/src/MMU.h
++++ b/desmume/src/MMU.h
+@@ -721,6 +721,10 @@ FORCEINLINE u8 _MMU_read08(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u3
+     call_registered_interface_mem_hook(addr, 1, HOOK_READ);
+ #endif
+ 
++	// The Xenon frontend has no debugger UI and never registers memory
++	// breakpoints. Compiling this empty-vector scan into every emulated memory
++	// access bloats all interpreter handlers and costs host CPU time.
++	#ifndef DESMUME_XENON
+ 	// break points, wheee
+ 	for (size_t i = 0; i < memReadBreakPoints.size(); ++i)
+ 	{
+@@ -730,6 +734,7 @@ FORCEINLINE u8 _MMU_read08(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u3
+ 			i = memReadBreakPoints.size();
+ 		}
+ 	}
++	#endif
+ 
+ 	if(PROCNUM==ARMCPU_ARM9)
+ 		if((addr&(~0x3FFF)) == MMU.DTCMRegion)
+@@ -769,6 +774,7 @@ FORCEINLINE u16 _MMU_read16(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u
+     call_registered_interface_mem_hook(addr, 2, HOOK_READ);
+ #endif
+ 
++	#ifndef DESMUME_XENON
+ 	// break points, wheee
+ 	for (size_t i = 0; i < memReadBreakPoints.size(); ++i)
+ 	{
+@@ -778,6 +784,7 @@ FORCEINLINE u16 _MMU_read16(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u
+ 			i = memReadBreakPoints.size();
+ 		}
+ 	}
++	#endif
+ 
+ 	//special handling for execution from arm9, since we spend so much time in there
+ 	if(PROCNUM==ARMCPU_ARM9 && AT == MMU_AT_CODE)
+@@ -829,6 +836,7 @@ FORCEINLINE u32 _MMU_read32(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u
+ #ifdef TARGET_INTERFACE
+     call_registered_interface_mem_hook(addr, 4, HOOK_READ);
+ #endif
++	#ifndef DESMUME_XENON
+ 	// break points, wheee
+ 	for (size_t i = 0; i < memReadBreakPoints.size(); ++i)
+ 	{
+@@ -838,6 +846,7 @@ FORCEINLINE u32 _MMU_read32(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u
+ 			i = memReadBreakPoints.size();
+ 		}
+ 	}
++	#endif
+ 
+ 	//special handling for execution from arm9, since we spend so much time in there
+ 	if(PROCNUM==ARMCPU_ARM9 && AT == MMU_AT_CODE)
+@@ -894,6 +903,7 @@ FORCEINLINE void _MMU_write08(const int PROCNUM, const MMU_ACCESS_TYPE AT, const
+ 		if((addr&(~0x3FFF)) == MMU.DTCMRegion) return; //dtcm
+ 	}
+ 
++	#ifndef DESMUME_XENON
+ 	// break points, wheee
+ 	for (size_t i = 0; i < memWriteBreakPoints.size(); ++i)
+ 	{
+@@ -903,6 +913,7 @@ FORCEINLINE void _MMU_write08(const int PROCNUM, const MMU_ACCESS_TYPE AT, const
+ 			i = memWriteBreakPoints.size();
+ 		}
+ 	}
++	#endif
+ 
+ 	if(PROCNUM==ARMCPU_ARM9)
+ 		if((addr&(~0x3FFF)) == MMU.DTCMRegion)
+@@ -952,6 +963,7 @@ FORCEINLINE void _MMU_write16(const int PROCNUM, const MMU_ACCESS_TYPE AT, const
+ 		if((addr&(~0x3FFF)) == MMU.DTCMRegion) return; //dtcm
+ 	}
+ 
++	#ifndef DESMUME_XENON
+ 	// break points, wheee
+ 	for (size_t i = 0; i < memWriteBreakPoints.size(); ++i)
+ 	{
+@@ -961,6 +973,7 @@ FORCEINLINE void _MMU_write16(const int PROCNUM, const MMU_ACCESS_TYPE AT, const
+ 			i = memWriteBreakPoints.size();
+ 		}
+ 	}
++	#endif
+ 
+ 	if(PROCNUM==ARMCPU_ARM9)
+ 		if((addr&(~0x3FFF)) == MMU.DTCMRegion)
+@@ -1007,6 +1020,7 @@ FORCEINLINE void _MMU_write32(const int PROCNUM, const MMU_ACCESS_TYPE AT, const
+ 		if((addr&(~0x3FFF)) == MMU.DTCMRegion) return; //dtcm
+ 	}
+ 
++	#ifndef DESMUME_XENON
+ 	// break points, wheee
+ 	for (size_t i = 0; i < memWriteBreakPoints.size(); ++i)
+ 	{
+@@ -1016,6 +1030,7 @@ FORCEINLINE void _MMU_write32(const int PROCNUM, const MMU_ACCESS_TYPE AT, const
+ 			i = memWriteBreakPoints.size();
+ 		}
+ 	}
++	#endif
+ 
+ 	if(PROCNUM==ARMCPU_ARM9)
+ 		if((addr&(~0x3FFF)) == MMU.DTCMRegion)
 diff --git a/desmume/src/NDSSystem.cpp b/desmume/src/NDSSystem.cpp
 index c5c7b421..79ef4d01 100755
 --- a/desmume/src/NDSSystem.cpp
@@ -58,6 +161,41 @@ index c5c7b421..79ef4d01 100755
  
  	return 0;
  }
+@@ -2008,6 +2030,10 @@ static /*donotinline*/ std::pair<s32,s32> armInnerLoop(
+ 				nds.idleCycles[0] += arm9-temp;
+ 				if (gxFIFO.size < 255) nds.freezeBus &= ~1;
+ 			}
++			// The Xenon frontend has no debugger UI. These fields remain zero for
++			// the entire session, so checking all three after every emulated ARM9
++			// instruction only burns host branch bandwidth in the hottest loop.
++			#ifndef DESMUME_XENON
+ 			// for proper stepping...
+ 			if (NDS_ARM9.debugStep) {
+ 				NDS_ARM9.debugStep = false;
+@@ -2026,6 +2052,7 @@ static /*donotinline*/ std::pair<s32,s32> armInnerLoop(
+ 				NDS_ARM9.runToRetTmp = 0;
+ 				NDS_ARM9.runToRet = true;
+ 			}
++			#endif
+ 		}
+ 		if(doarm7 && (!doarm9 || arm7 <= timer))
+ 		{
+@@ -2057,6 +2084,7 @@ static /*donotinline*/ std::pair<s32,s32> armInnerLoop(
+ #endif
+ 				}
+ 			}
++			#ifndef DESMUME_XENON
+ 			if (NDS_ARM7.debugStep) {
+ 				NDS_ARM7.debugStep = false;
+ 				execute = false;
+@@ -2074,6 +2102,7 @@ static /*donotinline*/ std::pair<s32,s32> armInnerLoop(
+ 				NDS_ARM7.runToRetTmp = 0;
+ 				NDS_ARM7.runToRet = true;
+ 			}
++			#endif
+ 		}
+ 
+ 		timer = minarmtime<doarm9,doarm7>(arm9,arm7);
 diff --git a/desmume/src/libretro-common/features/features_cpu.c b/desmume/src/libretro-common/features/features_cpu.c
 index e632a0a8..0d6ab084 100644
 --- a/desmume/src/libretro-common/features/features_cpu.c
@@ -331,10 +469,18 @@ index d8dde983..0a7cf931 100644
  void Task::start(bool spinlock) { impl->start(spinlock, 0, NULL); }
  void Task::start(bool spinlock, int threadPriority, const char *name) { impl->start(spinlock, threadPriority, name); }
 diff --git a/desmume/src/wifi.cpp b/desmume/src/wifi.cpp
-index 83153572..dea4373b 100644
+index 83153572..f02aabeb 100644
 --- a/desmume/src/wifi.cpp
 +++ b/desmume/src/wifi.cpp
-@@ -39,6 +39,40 @@
+@@ -17,6 +17,7 @@
+ */
+ 
+ #include <assert.h>
++#include <time.h>
+ #include "wifi.h"
+ #include "armcpu.h"
+ #include "NDSSystem.h"
+@@ -39,6 +40,40 @@
  #define PCAP_DEVICE_NAME description
  #else
  #include <stddef.h>

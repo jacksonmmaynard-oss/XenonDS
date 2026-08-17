@@ -31,6 +31,13 @@ Status DesmumeBackend::initialize(const CoreConfig&) {
     if (NDS_Init() != 0) {
         return Status(ErrorCode::backend_error, "DeSmuME NDS_Init failed");
     }
+#ifdef XENON
+    // Advanced bus timing simulates sequential wait states and the ARM9 cache
+    // controller on every guest fetch. DeSmuME supports disabling it as a
+    // faster, less cycle-exact mode; this is the default for the Xenon port.
+    CommonSettings.advanced_timing = false;
+    std::printf("[core] Fast bus timing enabled\n");
+#endif
     std::printf("[core] NDS_Init returned successfully\n");
     initialized_ = true;
     return Status::Ok();
@@ -155,6 +162,14 @@ Status DesmumeBackend::run_frame(const InputState& input, FrameOutput* output) {
 
 const DesmumeFrameProfile& DesmumeBackend::last_frame_profile() const {
     return last_frame_profile_;
+}
+
+void DesmumeBackend::request_frame_skip() {
+    NDS_SkipNextFrame();
+}
+
+void DesmumeBackend::cancel_frame_skip() {
+    NDS_OmitFrameSkip(2);
 }
 
 void DesmumeBackend::unload_rom() {
