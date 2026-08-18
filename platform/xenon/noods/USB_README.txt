@@ -1,4 +1,4 @@
-XenonDS v0.8.0 - NooDS multicore 3D preview
+XenonDS v0.8.1 - NooDS color and pacing preview
 
 Copy this package's contents to the root of a FAT32 USB drive, preserving the
 folders:
@@ -17,12 +17,14 @@ data periodically and again when you exit with the Guide button.
 
 Large ROMs show a `ROM preload` line. Wait for it to reach 100%, followed by
 `Core ready. Running game...`. The two DS screens then replace the text console.
-The upper-left FPS display uses a sustained 30-frame window, so it reads 00.0
-during initial sampling.
+The upper-left overlay reports EMU (emulated DS frames per second) and VID
+(frames displayed per second). Both read 00.0 during initial sampling. The
+default performance mode renders every other frame while continuing to execute
+the DS CPU and game clock every frame.
 
 Controls:
 
-  Xbox A/B/X/Y       DS B/A/Y/X (matching physical button positions)
+  Xbox A/B/X/Y       DS A/B/X/Y (matching printed button labels)
   D-pad              DS D-pad
   LB/RB              DS L/R
   Menu/View          DS Start/Select
@@ -34,7 +36,7 @@ This NooDS build uses native-resolution software rendering and has no
 audio, ROM browser, save states, microphone, or network emulation UI yet.
 
 If XenonDS stops at a diagnostic screen, photograph the complete ARM9/ARM7
-message and keep the matching v0.8.0 symbols artifact. The build is considered
+message and keep the matching v0.8.1 symbols artifact. The build is considered
 verified only after animated graphics, controller input, and `game.sav` have
 all been tested on the console.
 

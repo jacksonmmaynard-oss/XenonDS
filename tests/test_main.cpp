@@ -209,6 +209,18 @@ void test_screen_layouts() {
 
 void test_controller_mapper() {
     xenonds::ControllerMapper mapper;
+    xenonds::ControllerSnapshot label_test;
+    label_test.south = true;
+    xenonds::InputState label_input = mapper.map(label_test);
+    CHECK((label_input.buttons & xenonds::button_a) != 0);
+    CHECK((label_input.buttons & xenonds::button_b) == 0);
+
+    label_test.south = false;
+    label_test.east = true;
+    label_input = mapper.map(label_test);
+    CHECK((label_input.buttons & xenonds::button_a) == 0);
+    CHECK((label_input.buttons & xenonds::button_b) != 0);
+
     xenonds::ControllerSnapshot controller;
     controller.south = true;
     controller.east = true;
@@ -218,8 +230,8 @@ void test_controller_mapper() {
     controller.right_trigger = 255;
 
     const xenonds::InputState input = mapper.map(controller);
-    CHECK((input.buttons & xenonds::button_b) != 0);
     CHECK((input.buttons & xenonds::button_a) != 0);
+    CHECK((input.buttons & xenonds::button_b) != 0);
     CHECK((input.buttons & xenonds::button_l) != 0);
     CHECK(input.touch.pressed);
     CHECK(input.touch.x > xenonds::kScreenWidth / 2);

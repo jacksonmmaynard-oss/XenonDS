@@ -87,7 +87,10 @@ void configure_noods(const std::string& rom_path) {
     // so preload the image once and execute from a verified in-memory copy.
     Settings::romInRam = 1;
     Settings::fpsLimiter = 0;
-    Settings::frameskip = 0;
+    // Render every other frame by default. The DS CPU and game clock still
+    // execute every frame, while expensive 2D/3D drawing is skipped when the
+    // console cannot sustain full speed.
+    Settings::frameskip = 1;
     Settings::threaded2D = 0;
     // Split software 3D scanlines across both hardware contexts on the two
     // non-main physical CPU cores.
@@ -150,7 +153,7 @@ int main() {
     xenon_ata_init();
     xenon_atapi_init();
 
-    std::printf("XenonDS NooDS multicore 3D integration v0.8.0\n");
+    std::printf("XenonDS NooDS color and pacing integration v0.8.1\n");
     if (!xenonds::xenon::initialize_noods_video()) {
         fail("Xbox framebuffer information is invalid");
         return 1;
@@ -200,7 +203,8 @@ int main() {
     std::uint64_t last_frame_tick = mftb();
     std::uint64_t stats_window_tick = last_frame_tick;
     unsigned long stats_core_microseconds = 0;
-    unsigned int stats_frames = 0;
+    unsigned int stats_emulated_frames = 0;
+    unsigned int stats_video_frames = 0;
     xenonds::xenon::PerformanceStats performance;
 
     for (;;) {
@@ -240,26 +244,12 @@ int main() {
         }
         const unsigned long core_elapsed =
             tb_diff_usec(mftb(), core_start_tick);
+        stats_core_microseconds += core_elapsed;
+        ++stats_emulated_frames;
 
         const bool frame_ready = core->gpu.getFrame(ds_frame, false);
         if (frame_ready) {
-            stats_core_microseconds += core_elapsed;
-            ++stats_frames;
-            if (stats_frames >= kStatsWindowFrames) {
-                const unsigned long window_microseconds =
-                    tb_diff_usec(mftb(), stats_window_tick);
-                if (window_microseconds != 0) {
-                    performance.fps_tenths = static_cast<unsigned int>(
-                        (static_cast<unsigned long long>(stats_frames) *
-                         10000000ULL + window_microseconds / 2) /
-                        window_microseconds);
-                }
-                performance.core_microseconds =
-                    stats_core_microseconds / stats_frames;
-                stats_window_tick = mftb();
-                stats_core_microseconds = 0;
-                stats_frames = 0;
-            }
+            ++stats_video_frames;
 
             if (!saw_content) {
                 saw_content = frame_has_content(ds_frame);
@@ -268,18 +258,38 @@ int main() {
             }
             xenonds::xenon::present_noods_frame(
                 ds_frame, input.touch, performance);
+        }
 
-            // Pace actual DS video frames, not internal scheduler slices.
-            // NooDS may require many runCore() calls before a frame is ready.
-            const unsigned long elapsed = tb_diff_usec(mftb(), last_frame_tick);
-            if (elapsed < kTargetFrameMicroseconds)
-                udelay(static_cast<int>(kTargetFrameMicroseconds - elapsed));
-            last_frame_tick = mftb();
+        const unsigned long window_microseconds =
+            tb_diff_usec(mftb(), stats_window_tick);
+        if (stats_emulated_frames >= kStatsWindowFrames &&
+            window_microseconds >= 1000000UL) {
+            performance.emulation_fps_tenths = static_cast<unsigned int>(
+                (static_cast<unsigned long long>(stats_emulated_frames) *
+                 10000000ULL + window_microseconds / 2) /
+                window_microseconds);
+            performance.video_fps_tenths = static_cast<unsigned int>(
+                (static_cast<unsigned long long>(stats_video_frames) *
+                 10000000ULL + window_microseconds / 2) /
+                window_microseconds);
+            performance.core_microseconds =
+                stats_core_microseconds / stats_emulated_frames;
+            stats_window_tick = mftb();
+            stats_core_microseconds = 0;
+            stats_emulated_frames = 0;
+            stats_video_frames = 0;
+        }
 
-            if (++frames_since_save >= 300) {
-                core->cartridgeNds.writeSave();
-                frames_since_save = 0;
-            }
+        // Pace every emulated DS frame. With frame skipping enabled, pacing
+        // only presented frames would allow the game clock to run too fast.
+        const unsigned long elapsed = tb_diff_usec(mftb(), last_frame_tick);
+        if (elapsed < kTargetFrameMicroseconds)
+            udelay(static_cast<int>(kTargetFrameMicroseconds - elapsed));
+        last_frame_tick = mftb();
+
+        if (++frames_since_save >= 300) {
+            core->cartridgeNds.writeSave();
+            frames_since_save = 0;
         }
 
         const std::uint32_t unknown_opcodes =

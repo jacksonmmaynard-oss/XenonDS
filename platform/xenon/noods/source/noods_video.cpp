@@ -34,6 +34,7 @@ std::uint32_t queued_frame[kCombinedPixelCount];
 TouchState queued_touch;
 PerformanceStats queued_stats;
 std::vector<std::uint32_t> staging;
+std::uint8_t color_lut[256];
 
 std::size_t tiled_index(int x, int y, int width) {
     return static_cast<std::size_t>(
@@ -52,7 +53,12 @@ void put_pixel(const Framebuffer& framebuffer, int x, int y, std::uint32_t color
 
 std::uint32_t xenos_color(std::uint32_t rgb8) {
     // NooDS returns 0xAABBGGRR. Xenos' tiled framebuffer uses 0xBBGGRR00.
-    return rgb8 << 8u;
+    // Compress the raw full-range output into a DS-like display range. Direct
+    // expansion to 0-255 clips pale colors badly on the Xbox analog output.
+    const std::uint32_t red = color_lut[(rgb8 >> 0) & 0xFF];
+    const std::uint32_t green = color_lut[(rgb8 >> 8) & 0xFF];
+    const std::uint32_t blue = color_lut[(rgb8 >> 16) & 0xFF];
+    return (blue << 24) | (green << 16) | (red << 8);
 }
 
 void draw_screen(const Framebuffer& framebuffer,
@@ -105,6 +111,12 @@ std::uint16_t glyph_bits(char glyph) {
     case 'F': return 0x79E4u; // 111 100 111 100 100
     case 'P': return 0x7BE4u; // 111 101 111 100 100
     case 'S': return 0x79CFu; // 111 100 111 001 111
+    case 'E': return 0x79A7u; // 111 100 110 100 111
+    case 'M': return 0x5FEDu; // 101 111 111 101 101
+    case 'U': return 0x5B6Fu; // 101 101 101 101 111
+    case 'V': return 0x5B6Au; // 101 101 101 101 010
+    case 'I': return 0x7497u; // 111 010 010 010 111
+    case 'D': return 0x6B6Eu; // 110 101 101 101 110
     case '.': return 0x0002u; // bottom-center pixel
     default: return 0;
     }
@@ -130,6 +142,20 @@ void draw_glyph(const Framebuffer& framebuffer, char glyph, int left, int top,
     }
 }
 
+void draw_metric(const Framebuffer& framebuffer, char first, char second,
+                 char third, unsigned int value, int left, int top,
+                 int text_scale, std::uint32_t color) {
+    const int advance = 4 * text_scale;
+    char text[] = {first, second, third, ' ', '0', '0', '.', '0'};
+    text[4] = static_cast<char>('0' + ((value / 100) % 10));
+    text[5] = static_cast<char>('0' + ((value / 10) % 10));
+    text[7] = static_cast<char>('0' + (value % 10));
+    for (std::size_t i = 0; i < sizeof(text); ++i) {
+        draw_glyph(framebuffer, text[i], left + static_cast<int>(i) * advance,
+                   top, text_scale, color);
+    }
+}
+
 void draw_fps_counter(const Framebuffer& framebuffer,
                       const PerformanceStats& stats) {
     const int text_scale = framebuffer.visible_width >= 640 ? 3 : 2;
@@ -137,19 +163,14 @@ void draw_fps_counter(const Framebuffer& framebuffer,
     const int left = 12;
     const int top = 12;
     const int height = 5 * text_scale;
-    const unsigned int fps = stats.fps_tenths;
-    char text[] = {'F', 'P', 'S', ' ', '0', '0', '.', '0'};
-    text[4] = static_cast<char>('0' + ((fps / 100) % 10));
-    text[5] = static_cast<char>('0' + ((fps / 10) % 10));
-    text[7] = static_cast<char>('0' + (fps % 10));
+    const int line_gap = 3 * text_scale;
 
     fill_rect(framebuffer, left - 5, top - 5,
-              static_cast<int>(sizeof(text)) * advance + 6,
-              height + 10, 0x00000000u);
-    for (std::size_t i = 0; i < sizeof(text); ++i) {
-        draw_glyph(framebuffer, text[i], left + static_cast<int>(i) * advance,
-                   top, text_scale, 0x00E6A900u);
-    }
+              8 * advance + 6, height * 2 + line_gap + 10, 0x00000000u);
+    draw_metric(framebuffer, 'E', 'M', 'U', stats.emulation_fps_tenths,
+                left, top, text_scale, 0x00E6A900u);
+    draw_metric(framebuffer, 'V', 'I', 'D', stats.video_fps_tenths,
+                left, top + height + line_gap, text_scale, 0x00E6A900u);
 }
 
 void present_immediate(const std::uint32_t* source, const TouchState& touch,
@@ -206,6 +227,12 @@ bool initialize_noods_video() {
     output.padded_height = (output.visible_height + 31) & ~31;
     staging.resize(static_cast<std::size_t>(output.padded_width) *
                    output.padded_height);
+    for (unsigned int value = 0; value < 256; ++value) {
+        // Map 0..255 to 8..207: lower white level, lift absolute black a
+        // little, and preserve channel ordering with no per-frame division.
+        color_lut[value] = static_cast<std::uint8_t>(
+            8u + ((value * 25u + 16u) >> 5));
+    }
     // Screen rectangles overwrite themselves every frame, and the counter
     // clears its own backing rectangle. The surrounding matte is static, so
     // initialize it once instead of clearing a padded framebuffer every frame.

@@ -66,7 +66,7 @@ int main(void) {
     xenon_ata_init();
     xenon_atapi_init();
 
-    printf("XenonDS staged loader v0.8.0\n");
+    printf("XenonDS staged loader v0.8.1\n");
     printf("Stage 1/3: initializing FAT storage...\n");
     if (!fatInitDefault()) {
         printf("FAILED: no FAT storage device was mounted.\n");

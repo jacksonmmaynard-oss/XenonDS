@@ -68,11 +68,11 @@ int ControllerMapper::axis_delta(std::int16_t value) const {
 InputState ControllerMapper::map(const ControllerSnapshot& controller) {
     InputState input;
 
-    // Match physical face-button positions: Xbox A/B/X/Y become DS B/A/Y/X.
-    set_button(controller.south, button_b, &input.buttons);
-    set_button(controller.east, button_a, &input.buttons);
-    set_button(controller.west, button_y, &input.buttons);
-    set_button(controller.north, button_x, &input.buttons);
+    // Match the printed Xbox labels so A confirms and B cancels naturally.
+    set_button(controller.south, button_a, &input.buttons);
+    set_button(controller.east, button_b, &input.buttons);
+    set_button(controller.west, button_x, &input.buttons);
+    set_button(controller.north, button_y, &input.buttons);
     set_button(controller.dpad_up, button_up, &input.buttons);
     set_button(controller.dpad_down, button_down, &input.buttons);
     set_button(controller.dpad_left, button_left, &input.buttons);

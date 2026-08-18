@@ -1,7 +1,7 @@
 # Xbox 360 runtime test
 
 XenonDS provides a hardware probe, a legacy DeSmuME performance checkpoint,
-and the v0.8.0 NooDS multicore 3D preview. The NooDS build enters the live game loop
+and the v0.8.1 NooDS color and pacing preview. The NooDS build enters the live game loop
 with controller/touch input and persistent cartridge saves.
 
 ## Prepare the USB drive
@@ -90,7 +90,7 @@ the repository or in bug reports.
 ## NooDS controls and saves
 
 Boot XeLL and press **A** at the staged-loader prompt. The Xbox face buttons
-map by physical position: A/B/X/Y become DS B/A/Y/X. The D-pad, bumpers,
+match their printed DS labels: A/B/X/Y become DS A/B/X/Y. The D-pad, bumpers,
 Menu/View buttons become the DS D-pad, L/R, and Start/Select. Move the touch
 cursor with the right stick and touch with the right trigger.
 
@@ -100,17 +100,19 @@ no audio, ROM browser, save-state UI, microphone input, or network UI. Direct
 boot does not require Nintendo DS BIOS or firmware files.
 
 For a large ROM, wait for the `ROM preload` line to reach `100%`; do not power
-off while the USB drive is being read. A successful v0.8.0 startup then prints
+off while the USB drive is being read. A successful v0.8.1 startup then prints
 `Core ready. Running game...` and switches to the two DS screens. The frontend
 updates the television only when NooDS completes a new DS frame, so startup is
-no longer delayed once per internal scheduler slice. The upper-left counter
-reports sustained FPS over 30 completed frames and initially displays `00.0`.
+no longer delayed once per internal scheduler slice. The upper-left overlay
+separates EMU game-clock throughput from VID displayed-frame throughput. The
+default one-frame performance skip reduces expensive rendering without skipping
+DS CPU or input execution. Both counters initially display `00.0`.
 
 If startup remains blank for 600 completed DS frames or the emulated CPUs hit
 the invalid-opcode limit, XenonDS returns to a diagnostic screen containing the
 ARM9 and ARM7 program counters and last invalid opcodes. Photograph that whole
 screen for a bug report. A XeLL crash screen should be reported with its full
-stack dump and the matching unstripped v0.8.0 symbols artifact.
+stack dump and the matching unstripped v0.8.1 symbols artifact.
 
 The release is considered hardware-certified only after the exact runtime
 artifact reaches animated game graphics, responds to a controller input, and

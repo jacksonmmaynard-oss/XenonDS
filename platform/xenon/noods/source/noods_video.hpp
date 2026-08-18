@@ -9,10 +9,12 @@ namespace xenonds {
 namespace xenon {
 
 struct PerformanceStats {
-    unsigned int fps_tenths;
+    unsigned int video_fps_tenths;
+    unsigned int emulation_fps_tenths;
     unsigned long core_microseconds;
 
-    PerformanceStats(): fps_tenths(0), core_microseconds(0) {}
+    PerformanceStats(): video_fps_tenths(0), emulation_fps_tenths(0),
+                        core_microseconds(0) {}
 };
 
 bool initialize_noods_video();
