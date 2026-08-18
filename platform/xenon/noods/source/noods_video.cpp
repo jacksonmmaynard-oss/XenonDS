@@ -26,7 +26,9 @@ struct Framebuffer {
 
 Framebuffer output = {};
 bool initialized = false;
-const int kVideoThread = 2;
+// Keep both non-main physical cores dedicated to NooDS software-3D workers.
+// Presentation uses the main core's sibling hardware context.
+const int kVideoThread = 1;
 alignas(16) unsigned char worker_stack[64 * 1024];
 std::uint32_t queued_frame[kCombinedPixelCount];
 TouchState queued_touch;

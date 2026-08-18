@@ -1,4 +1,4 @@
-XenonDS v0.7.1 - NooDS performance preview
+XenonDS v0.8.0 - NooDS multicore 3D preview
 
 Copy this package's contents to the root of a FAT32 USB drive, preserving the
 folders:
@@ -34,7 +34,7 @@ This NooDS build uses native-resolution software rendering and has no
 audio, ROM browser, save states, microphone, or network emulation UI yet.
 
 If XenonDS stops at a diagnostic screen, photograph the complete ARM9/ARM7
-message and keep the matching v0.7.1 symbols artifact. The build is considered
+message and keep the matching v0.8.0 symbols artifact. The build is considered
 verified only after animated graphics, controller input, and `game.sav` have
 all been tested on the console.
 

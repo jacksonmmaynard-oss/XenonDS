@@ -577,6 +577,99 @@ index 215d3a5..2be8f7e 100644
  #define ROL32(v, s) ((v << s) | (v >> (32 - s)))
 -#define ROR32(v, s) ((v >> s) | (v << (32 - s)))
 +#define ROR32(v, s) rotateRight32((v), (s))
+diff --git a/src/core/gpu/gpu_3d_renderer.cpp b/src/core/gpu/gpu_3d_renderer.cpp
+index 7460cb8..91571e3 100644
+--- a/src/core/gpu/gpu_3d_renderer.cpp
++++ b/src/core/gpu/gpu_3d_renderer.cpp
+@@ -113,6 +113,16 @@ uint32_t *Gpu3DRenderer::getLine1(int line) {
+
+ void Gpu3DRenderer::drawScanline(int line) {
+     if (line == 0) {
++        // Update the resolution shift for the next frame
++        resShift = Settings::highRes3D;
++
++#ifdef NOODS_XENON
++        const int lineCount = 192 << resShift;
++        memset(solidLineCounts, 0, lineCount * sizeof(solidLineCounts[0]));
++        memset(translucentLineCounts, 0,
++               lineCount * sizeof(translucentLineCounts[0]));
++#endif
++
+         // Calculate the scanline bounds for each polygon
+         for (int i = 0; i < core->gpu3D.polygonCountOut; i++) {
+             polygonTop[i] = 192 * 2;
+@@ -127,10 +137,24 @@ void Gpu3DRenderer::drawScanline(int line) {
+
+             // Allow horizontal line polygons to be drawn
+             if (polygonTop[i] == polygonBot[i]) polygonBot[i]++;
+-        }
+
+-        // Update the resolution shift for the next frame
+-        resShift = Settings::highRes3D;
++#ifdef NOODS_XENON
++            const bool translucent = polygon->alpha < 0x3F ||
++                polygon->textureFmt == 1 || polygon->textureFmt == 6;
++            int top = polygonTop[i] < 0 ? 0 : polygonTop[i];
++            int bottom = polygonBot[i] > lineCount ? lineCount : polygonBot[i];
++            for (int y = top; y < bottom; ++y) {
++                if (translucent) {
++                    uint16_t &count = translucentLineCounts[y];
++                    polygonLines[y][2047 - count++] = i;
++                }
++                else {
++                    uint16_t &count = solidLineCounts[y];
++                    polygonLines[y][count++] = i;
++                }
++            }
++#endif
++        }
+
+         // Clean up any existing threads
+         for (size_t i = 0; i < threads.size(); i++) {
+@@ -230,6 +254,14 @@ void Gpu3DRenderer::drawScanline1(int line) {
+
+     stencilClear[line] = false;
+
++#ifdef NOODS_XENON
++    // Draw the pre-binned polygons without scanning the complete polygon list
++    // on every scanline. Both passes retain the original polygon order.
++    for (uint16_t i = 0; i < solidLineCounts[line]; ++i)
++        drawPolygon(line, polygonLines[line][i]);
++    for (uint16_t i = 0; i < translucentLineCounts[line]; ++i)
++        drawPolygon(line, polygonLines[line][2047 - i]);
++#else
+     std::vector<int> translucent;
+
+     // Draw the polygons
+@@ -249,6 +281,7 @@ void Gpu3DRenderer::drawScanline1(int line) {
+     // Draw the translucent polygons
+     for (unsigned int i = 0; i < translucent.size(); i++)
+         drawPolygon(line, translucent[i]);
++#endif
+ }
+
+ void Gpu3DRenderer::finishScanline(int line) {
+diff --git a/src/core/gpu/gpu_3d_renderer.h b/src/core/gpu/gpu_3d_renderer.h
+index 47e07ac..4f2ba7b 100644
+--- a/src/core/gpu/gpu_3d_renderer.h
++++ b/src/core/gpu/gpu_3d_renderer.h
+@@ -63,6 +63,16 @@ private:
+     int polygonTop[2048] = {};
+     int polygonBot[2048] = {};
+
++#ifdef NOODS_XENON
++    // Build ordered per-scanline polygon bins once per frame. The generic
++    // renderer otherwise scans every polygon for every line, which dominates
++    // complex scenes on Xenon's in-order CPU cores. Solid entries grow from
++    // the front and translucent entries grow from the back in draw order.
++    uint16_t polygonLines[192 * 2][2048] = {};
++    uint16_t solidLineCounts[192 * 2] = {};
++    uint16_t translucentLineCounts[192 * 2] = {};
++#endif
++
+     uint8_t activeThreads = 0;
+     std::vector<std::thread*> threads;
+     std::atomic<int> ready[192 * 2];
 diff --git a/src/core/io/aes.cpp b/src/core/io/aes.cpp
 index 2aeaec5..1e17077 100644
 --- a/src/core/io/aes.cpp

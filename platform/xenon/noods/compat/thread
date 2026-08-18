@@ -1,25 +1,92 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// NooDS only constructs these when threaded2D/threaded3D are non-zero. The
-// first Xbox backend runs those paths synchronously and uses a dedicated
-// LibXenon hardware thread solely for video presentation.
+// Small std::thread subset backed by LibXenon's hardware-thread task API.
+// XenonDS reserves both hardware contexts on each non-main physical core for
+// NooDS 3D workers. Presentation uses the main core's sibling context so
+// rasterization and display can overlap safely.
+namespace xenonds_thread_compat {
+
+class Task {
+public:
+    virtual ~Task() {}
+    virtual void run() = 0;
+};
+
+int launch(Task* task);
+void join(int slot);
+
+} // namespace xenonds_thread_compat
+
 namespace std {
 
 class thread {
 public:
-    thread() {}
+    thread(): task_(0), slot_(-1) {}
 
-    template <typename Function, typename... Args>
-    explicit thread(Function, Args...) {}
+    template <typename Class>
+    explicit thread(void (Class::*function)(), Class* object):
+        task_(new MemberTask0<Class>(function, object)),
+        slot_(xenonds_thread_compat::launch(task_)) {}
 
-    bool joinable() const { return false; }
-    void join() {}
-    void detach() {}
+    template <typename Class>
+    thread(void (Class::*function)(int), Class* object, int argument):
+        task_(new MemberTask1<Class>(function, object, argument)),
+        slot_(xenonds_thread_compat::launch(task_)) {}
+
+    ~thread() {
+        if (joinable()) join();
+    }
+
+    bool joinable() const { return task_ != 0; }
+
+    void join() {
+        if (!task_) return;
+        xenonds_thread_compat::join(slot_);
+        delete task_;
+        task_ = 0;
+        slot_ = -1;
+    }
+
+    void detach() { join(); }
+
+private:
+    template <typename Class>
+    class MemberTask0: public xenonds_thread_compat::Task {
+    public:
+        MemberTask0(void (Class::*function)(), Class* object):
+            function_(function), object_(object) {}
+
+        void run() { (object_->*function_)(); }
+
+    private:
+        void (Class::*function_)();
+        Class* object_;
+    };
+
+    template <typename Class>
+    class MemberTask1: public xenonds_thread_compat::Task {
+    public:
+        MemberTask1(void (Class::*function)(int), Class* object, int argument):
+            function_(function), object_(object), argument_(argument) {}
+
+        void run() { (object_->*function_)(argument_); }
+
+    private:
+        void (Class::*function_)(int);
+        Class* object_;
+        int argument_;
+    };
+
+    thread(const thread&);
+    thread& operator=(const thread&);
+
+    xenonds_thread_compat::Task* task_;
+    int slot_;
 };
 
 namespace this_thread {
-inline void yield() {}
+inline void yield() { __asm__ volatile("" ::: "memory"); }
 }
 
 } // namespace std

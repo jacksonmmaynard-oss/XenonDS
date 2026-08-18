@@ -41,7 +41,7 @@
 - [ ] PowerPC code emitter and executable-code cache
 - [ ] ARM and Thumb basic-block translation
 - [ ] Interpreter fallback for unsupported operations
-- [ ] Multi-thread software 3D experiments
+- [x] Multi-thread software 3D across the four non-main Xenon hardware contexts
 - [ ] Stable 59.826 FPS, synchronized audio and saving
 
 ## Milestone 4: public alpha

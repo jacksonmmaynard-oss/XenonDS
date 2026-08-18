@@ -25,6 +25,7 @@ fi
     -I"$repo_root/third_party/noods/src/core/io" \
     -I"$repo_root/third_party/noods/src/core/memory" \
     "$repo_root/platform/xenon/noods/source/main.cpp" \
+    "$repo_root/platform/xenon/noods/source/thread_compat.cpp" \
     "$repo_root/platform/xenon/noods/source/noods_video.cpp" \
     "$repo_root/platform/xenon/shared/rom_finder.cpp"
 

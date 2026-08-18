@@ -33,20 +33,95 @@ std::size_t count_red_pixels() {
     return count;
 }
 
+std::uint32_t hash_3d_frame(Core& core) {
+    std::uint32_t hash = 2166136261u;
+    for (int y = 0; y < 192; ++y) {
+        const std::uint32_t* line = core.gpu3DRenderer.getLine(y);
+        for (int x = 0; x < 256; ++x) {
+            hash ^= line[x];
+            hash *= 16777619u;
+        }
+    }
+    return hash;
+}
+
+void prepare_3d_benchmark(Core& core) {
+    const int columns = 24;
+    const int rows = 16;
+    const int polygon_count = columns * rows;
+    core.gpu3D.polygonCountOut = polygon_count;
+    core.gpu3D.vertexCountOut = polygon_count * 4;
+
+    for (int i = 0; i < polygon_count; ++i) {
+        const int column = i % columns;
+        const int row = i / columns;
+        const int left = column * 256 / columns;
+        const int right = (column + 1) * 256 / columns;
+        const int top = row * 192 / rows;
+        const int bottom = (row + 1) * 192 / rows;
+        Vertex* vertices = &core.gpu3D.verticesOut[i * 4];
+        vertices[0].x = left;  vertices[0].y = top;
+        vertices[1].x = right; vertices[1].y = top;
+        vertices[2].x = right; vertices[2].y = bottom;
+        vertices[3].x = left;  vertices[3].y = bottom;
+        for (int vertex = 0; vertex < 4; ++vertex) {
+            vertices[vertex].z = 0x1000 + i;
+            vertices[vertex].w = 0x1000;
+            vertices[vertex].color =
+                ((i * 13) & 0x3F) |
+                (((i * 29) & 0x3F) << 6) |
+                (((i * 47) & 0x3F) << 12);
+        }
+
+        _Polygon& polygon = core.gpu3D.polygonsOut[i];
+        polygon = _Polygon();
+        polygon.vertices = i * 4;
+        polygon.size = 4;
+        polygon.alpha = (i % 7 == 0) ? 0x28 : 0x3F;
+        polygon.id = i & 0x3F;
+    }
+
+    core.gpu3DRenderer.writeClearColor(0xFFFFFFFFu, 0);
+    core.gpu3DRenderer.writeClearDepth(0xFFFFu, 0x7FFFu);
+}
+
+double benchmark_3d(Core& core, int frames, int threads,
+                    std::uint32_t* output_hash) {
+    Settings::threaded3D = threads;
+    const std::chrono::steady_clock::time_point start =
+        std::chrono::steady_clock::now();
+    std::uint32_t hash = 0;
+    for (int frame = 0; frame < frames; ++frame) {
+        for (int line = 0; line < 192; ++line)
+            core.gpu3DRenderer.drawScanline(line);
+        hash = hash_3d_frame(core);
+    }
+    const std::chrono::duration<double> elapsed =
+        std::chrono::steady_clock::now() - start;
+    *output_hash = hash;
+    return frames / elapsed.count();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 4) {
         std::fprintf(stderr,
-                     "usage: noods_core_smoke ROM.nds [--boot | --benchmark FRAMES]\n");
+                     "usage: noods_core_smoke ROM.nds "
+                     "[--boot | --benchmark FRAMES | --renderer-benchmark FRAMES]\n");
         return 2;
     }
     const bool boot_probe = argc == 3 && std::strcmp(argv[2], "--boot") == 0;
     const bool benchmark = argc == 4 &&
         std::strcmp(argv[2], "--benchmark") == 0;
+    const bool renderer_benchmark = argc == 4 &&
+        std::strcmp(argv[2], "--renderer-benchmark") == 0;
     const int benchmark_frames = benchmark ? std::atoi(argv[3]) : 0;
+    const int renderer_frames = renderer_benchmark ? std::atoi(argv[3]) : 0;
     if ((argc == 3 && !boot_probe) ||
-        (argc == 4 && (!benchmark || benchmark_frames < 1))) {
+        (argc == 4 && ((!benchmark && !renderer_benchmark) ||
+                       (benchmark && benchmark_frames < 1) ||
+                       (renderer_benchmark && renderer_frames < 1)))) {
         std::fprintf(stderr, "unknown mode: %s\n", argv[2]);
         return 2;
     }
@@ -69,6 +144,29 @@ int main(int argc, char** argv) {
 
     try {
         Core* core = new Core(argv[1]);
+
+        if (renderer_benchmark) {
+            prepare_3d_benchmark(*core);
+            std::uint32_t serial_hash = 0;
+            std::uint32_t threaded_hash = 0;
+            const double serial_fps = benchmark_3d(
+                *core, renderer_frames, 0, &serial_hash);
+            const double threaded_fps = benchmark_3d(
+                *core, renderer_frames, 4, &threaded_hash);
+            if (serial_hash != threaded_hash) {
+                std::fprintf(stderr,
+                             "3D thread mismatch: serial=%08X threaded=%08X\n",
+                             serial_hash, threaded_hash);
+                delete core;
+                return 1;
+            }
+            std::printf("RENDER_BENCH frames=%d serial_fps=%.2f "
+                        "threaded_fps=%.2f speedup=%.2fx hash=%08X\n",
+                        renderer_frames, serial_fps, threaded_fps,
+                        threaded_fps / serial_fps, serial_hash);
+            delete core;
+            return 0;
+        }
 
         if (benchmark) {
             // Warm caches and one-time core paths before measuring steady-state

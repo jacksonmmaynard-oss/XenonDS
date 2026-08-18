@@ -10,9 +10,9 @@ emulation cores adapted for the Xbox 360.
 
 > **Project status:** Experimental. XenonDS now boots a retail Nintendo DS game
 > on real Xbox 360 hardware with animated dual-screen video, controller input,
-> touch input, and persistent cartridge saves. The v0.7.1 performance preview
-> adds a live FPS counter and a Xenon-oriented interpreter dispatch path. Audio,
-> a ROM browser, and broad compatibility testing are not included yet.
+> touch input, and persistent cartridge saves. The v0.8.0 preview adds a live
+> FPS counter, a Xenon-oriented interpreter path, and multicore software 3D.
+> Audio, a ROM browser, and broad compatibility testing are not included yet.
 
 ## Hardware demo
 
@@ -41,6 +41,7 @@ as a real-console milestone, not a full-speed compatibility claim.
 - Asynchronous Xbox framebuffer presentation on a second hardware thread
 - Sustained 30-frame on-screen FPS counter
 - Xenon-specific direct THUMB/branch dispatch and reverse-sorted event queue
+- Four-worker NooDS software-3D renderer with ordered scanline polygon bins
 
 ## Build and test
 
@@ -79,7 +80,7 @@ Running the resulting `.elf32` file requires a homebrew-capable Xbox 360 and
 XeLL. Copy only a legally dumped `.nds` image to the USB drive; this milestone
 inspects metadata and does not execute the game yet.
 
-## NooDS v0.7.1 performance preview
+## NooDS v0.8.0 multicore 3D preview
 
 The current Xbox target uses a pinned and patched NooDS core. It boots the first valid
 `.nds` file found in `XenonDS/`, `xenonds/`, or the root of a mounted FAT
@@ -103,7 +104,7 @@ blank-frame watchdogs stop with ARM9/ARM7 diagnostics instead of endlessly
 reloading XeLL. The television overlay reports sustained FPS over a 30-frame
 window.
 
-The v0.7.1 optimization pass replaces expensive indirect dispatch for common
+The v0.7.1 optimization pass replaced expensive indirect dispatch for common
 THUMB instructions and ARM branches, uses native endian-correct mapped-memory
 accesses, removes unused audio scheduling, enables link-time optimization, and
 keeps the scheduler's next event at the end of its vector for constant-time
@@ -111,7 +112,16 @@ removal. On the deterministic host interpreter benchmark, the same frame hash
 improved from 354.95 to 528.13 FPS (48.8%). Actual console performance varies
 by game; the on-screen counter is the authoritative hardware measurement.
 
-GitHub Actions publishes three v0.7.1 artifacts from the same build: the
+The v0.8.0 pass targets the next measured bottleneck: software 3D. Four LibXenon
+worker contexts now split NooDS scanlines across the two non-main physical CPU
+cores, while video presentation uses the main core's sibling context. Ordered
+per-scanline polygon bins also avoid rescanning the complete polygon list for
+every row. A deterministic 384-polygon renderer benchmark produced the same
+frame hash in serial and threaded modes and improved from 1141.54 to 2717.16
+FPS on the host (2.38x). The real-console result still depends on scene mix and
+must be measured with the overlay.
+
+GitHub Actions publishes three v0.8.0 artifacts from the same build: the
 USB-ready runtime, unstripped debug symbols, and a corresponding-source archive
 containing the exact pinned NooDS source used by the executable.
 

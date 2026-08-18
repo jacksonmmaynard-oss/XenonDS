@@ -26,6 +26,7 @@ mapfile -t sources < <(
 
 "$binary" "$rom_path"
 "$binary" "$rom_path" --benchmark "${NOODS_BENCHMARK_FRAMES:-600}"
+"$binary" "$rom_path" --renderer-benchmark "${NOODS_RENDERER_BENCHMARK_FRAMES:-120}"
 
 # Optionally exercise a larger redistributable homebrew ROM supplied by the
 # caller. This is useful for release validation without checking ROM binaries

@@ -89,7 +89,9 @@ void configure_noods(const std::string& rom_path) {
     Settings::fpsLimiter = 0;
     Settings::frameskip = 0;
     Settings::threaded2D = 0;
-    Settings::threaded3D = 0;
+    // Split software 3D scanlines across both hardware contexts on the two
+    // non-main physical CPU cores.
+    Settings::threaded3D = 4;
     Settings::highRes3D = 0;
     Settings::screenGhost = 0;
     Settings::emulateAudio = 0;
@@ -148,7 +150,7 @@ int main() {
     xenon_ata_init();
     xenon_atapi_init();
 
-    std::printf("XenonDS NooDS performance integration v0.7.1\n");
+    std::printf("XenonDS NooDS multicore 3D integration v0.8.0\n");
     if (!xenonds::xenon::initialize_noods_video()) {
         fail("Xbox framebuffer information is invalid");
         return 1;
