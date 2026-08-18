@@ -1,4 +1,4 @@
-XenonDS v0.7.0 - NooDS release candidate
+XenonDS v0.7.1 - NooDS performance preview
 
 Copy this package's contents to the root of a FAT32 USB drive, preserving the
 folders:
@@ -17,6 +17,8 @@ data periodically and again when you exit with the Guide button.
 
 Large ROMs show a `ROM preload` line. Wait for it to reach 100%, followed by
 `Core ready. Running game...`. The two DS screens then replace the text console.
+The upper-left FPS display uses a sustained 30-frame window, so it reads 00.0
+during initial sampling.
 
 Controls:
 
@@ -28,11 +30,11 @@ Controls:
   Right trigger      Touch the touchscreen
   Guide              Save and exit
 
-This first NooDS build uses native-resolution software rendering and has no
+This NooDS build uses native-resolution software rendering and has no
 audio, ROM browser, save states, microphone, or network emulation UI yet.
 
 If XenonDS stops at a diagnostic screen, photograph the complete ARM9/ARM7
-message and keep the matching v0.7 symbols artifact. The build is considered
+message and keep the matching v0.7.1 symbols artifact. The build is considered
 verified only after animated graphics, controller input, and `game.sav` have
 all been tested on the console.
 

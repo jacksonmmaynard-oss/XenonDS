@@ -26,8 +26,8 @@ include $(PLATFORM_DIR)/noods_sources.mk
 NOODS_OFILES := $(addprefix noods/,$(NOODS_CPP_SOURCES:.cpp=.o))
 NOODS_LIBRARY := noods/libnoods.a
 NOODS_DEFINES := -DENDIAN_BIG=1 -DNO_FDOPEN=1 -DLOG_LEVEL=0 -DNOODS_XENON=1
-NOODS_CXXFLAGS := -Ofast
-NOODS_LDFLAGS :=
+NOODS_CXXFLAGS := -Ofast -flto -fno-fat-lto-objects -fno-rtti -fno-threadsafe-statics
+NOODS_LDFLAGS := -flto
 else ifeq ($(WITH_DESMUME),1)
 TARGET := xenonds-desmume
 BUILD := build-desmume-fasttiming-o2

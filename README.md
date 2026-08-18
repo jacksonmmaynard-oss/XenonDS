@@ -8,12 +8,18 @@ XenonDS is an open-source Nintendo DS emulator port for Xbox 360 homebrew.
 It combines a portable frontend with LibXenon platform support and Nintendo DS
 emulation cores adapted for the Xbox 360.
 
-> **Project status:** Experimental. The v0.7 NooDS release candidate passes
-> reproducible ARM, memory, input, direct-boot, and software-video tests on the
-> host. Its Xbox frontend provides dual-screen video, controller/touch input,
-> and persistent cartridge saves. The exact release ELF still needs its final
-> Xbox hardware test; audio, a ROM browser, and broad compatibility testing are
-> not included yet.
+> **Project status:** Experimental. XenonDS now boots a retail Nintendo DS game
+> on real Xbox 360 hardware with animated dual-screen video, controller input,
+> touch input, and persistent cartridge saves. The v0.7.1 performance preview
+> adds a live FPS counter and a Xenon-oriented interpreter dispatch path. Audio,
+> a ROM browser, and broad compatibility testing are not included yet.
+
+## Hardware demo
+
+https://github.com/user-attachments/assets/14ba5767-a1ef-4ce8-8817-85949b17969b
+
+The video shows the first v0.7.0 hardware run at roughly 17 FPS. It is included
+as a real-console milestone, not a full-speed compatibility claim.
 
 ## Implemented
 
@@ -33,6 +39,8 @@ emulation cores adapted for the Xbox 360.
 - NooDS direct-boot core with no proprietary BIOS requirement
 - Persistent `.sav` loading and periodic/exit-time save flushing
 - Asynchronous Xbox framebuffer presentation on a second hardware thread
+- Sustained 30-frame on-screen FPS counter
+- Xenon-specific direct THUMB/branch dispatch and reverse-sorted event queue
 
 ## Build and test
 
@@ -71,7 +79,7 @@ Running the resulting `.elf32` file requires a homebrew-capable Xbox 360 and
 XeLL. Copy only a legally dumped `.nds` image to the USB drive; this milestone
 inspects metadata and does not execute the game yet.
 
-## NooDS v0.7 release candidate
+## NooDS v0.7.1 performance preview
 
 The current Xbox target uses a pinned and patched NooDS core. It boots the first valid
 `.nds` file found in `XenonDS/`, `xenonds/`, or the root of a mounted FAT
@@ -92,9 +100,18 @@ The build prints ROM-preload progress for large games. After `Core ready`, it
 only presents and paces newly completed DS frames; internal NooDS scheduler
 slices are never mistaken for video frames. Invalid-instruction and prolonged
 blank-frame watchdogs stop with ARM9/ARM7 diagnostics instead of endlessly
-reloading XeLL.
+reloading XeLL. The television overlay reports sustained FPS over a 30-frame
+window.
 
-GitHub Actions publishes three v0.7 artifacts from the same build: the
+The v0.7.1 optimization pass replaces expensive indirect dispatch for common
+THUMB instructions and ARM branches, uses native endian-correct mapped-memory
+accesses, removes unused audio scheduling, enables link-time optimization, and
+keeps the scheduler's next event at the end of its vector for constant-time
+removal. On the deterministic host interpreter benchmark, the same frame hash
+improved from 354.95 to 528.13 FPS (48.8%). Actual console performance varies
+by game; the on-screen counter is the authoritative hardware measurement.
+
+GitHub Actions publishes three v0.7.1 artifacts from the same build: the
 USB-ready runtime, unstripped debug symbols, and a corresponding-source archive
 containing the exact pinned NooDS source used by the executable.
 

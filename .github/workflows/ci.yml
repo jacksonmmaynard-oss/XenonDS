@@ -102,25 +102,25 @@ jobs:
           free60/libxenon:latest
           bash -lc "bash scripts/fetch_noods.sh && make -C platform/xenon clean WITH_NOODS=1 && make -C platform/xenon WITH_NOODS=1 && make -C platform/xenon/loader clean && make -C platform/xenon/loader && bash scripts/package_noods_runtime.sh && bash scripts/package_noods_source.sh"
 
-      - name: Upload USB-ready v0.7 runtime
+      - name: Upload USB-ready v0.7.1 runtime
         uses: actions/upload-artifact@v4
         with:
-          name: XenonDS-v0.7.0-noods-runtime
+          name: XenonDS-v0.7.1-noods-runtime
           path: platform/xenon/release-noods
           if-no-files-found: error
 
-      - name: Upload v0.7 debug symbols
+      - name: Upload v0.7.1 debug symbols
         uses: actions/upload-artifact@v4
         with:
-          name: XenonDS-v0.7.0-noods-symbols
+          name: XenonDS-v0.7.1-noods-symbols
           path: |
             platform/xenon/xenonds-noods.elf
             platform/xenon/build-noods/xenonds-noods.elf.map
           if-no-files-found: error
 
-      - name: Upload v0.7 corresponding source
+      - name: Upload v0.7.1 corresponding source
         uses: actions/upload-artifact@v4
         with:
-          name: XenonDS-v0.7.0-source
-          path: platform/xenon/XenonDS-v0.7.0-source.tar.gz
+          name: XenonDS-v0.7.1-source
+          path: platform/xenon/XenonDS-v0.7.1-source.tar.gz
           if-no-files-found: error

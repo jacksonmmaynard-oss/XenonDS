@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-output="$repo_root/platform/xenon/XenonDS-v0.7.0-source.tar.gz"
+output="$repo_root/platform/xenon/XenonDS-v0.7.1-source.tar.gz"
 staging="$(mktemp -d "${TMPDIR:-/tmp}/xenonds-source.XXXXXX")"
 trap 'rm -rf -- "$staging"' EXIT
 
@@ -17,12 +17,12 @@ if [[ -n "$(git -c "safe.directory=$repo_root" -C "$repo_root" status --porcelai
     exit 1
 fi
 
-mkdir -p "$staging/XenonDS-v0.7.0"
+mkdir -p "$staging/XenonDS-v0.7.1"
 git -c "safe.directory=$repo_root" -C "$repo_root" archive --format=tar HEAD | \
-    tar -xf - -C "$staging/XenonDS-v0.7.0"
-mkdir -p "$staging/XenonDS-v0.7.0/third_party/noods"
+    tar -xf - -C "$staging/XenonDS-v0.7.1"
+mkdir -p "$staging/XenonDS-v0.7.1/third_party/noods"
 tar -C "$repo_root/third_party/noods" --exclude=.git -cf - . | \
-    tar -xf - -C "$staging/XenonDS-v0.7.0/third_party/noods"
-tar -czf "$output" -C "$staging" XenonDS-v0.7.0
+    tar -xf - -C "$staging/XenonDS-v0.7.1/third_party/noods"
+tar -czf "$output" -C "$staging" XenonDS-v0.7.1
 
 printf 'Packaged corresponding source at %s\n' "$output"

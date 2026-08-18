@@ -1,6 +1,7 @@
-XenonDS v0.7.0 release candidate
+XenonDS v0.7.1 performance preview
 Core: NooDS
 NooDS upstream commit: 4cb1439c330248b26cdf5f8dbcfa4e5ac53dcda0
 
-This build uses direct boot, dual-screen video, controller/touch input, and
-periodic plus exit-time cartridge-save flushing. Audio is not enabled yet.
+This build uses direct boot, dual-screen video, controller/touch input, a live
+30-frame FPS counter, and periodic plus exit-time cartridge-save flushing. Its
+Xbox-specific interpreter/event hot path is LTO-optimized. Audio is disabled.

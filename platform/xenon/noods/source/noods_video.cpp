@@ -30,6 +30,7 @@ const int kVideoThread = 2;
 alignas(16) unsigned char worker_stack[64 * 1024];
 std::uint32_t queued_frame[kCombinedPixelCount];
 TouchState queued_touch;
+PerformanceStats queued_stats;
 std::vector<std::uint32_t> staging;
 
 std::size_t tiled_index(int x, int y, int width) {
@@ -86,8 +87,71 @@ void draw_touch_cursor(const Framebuffer& framebuffer,
     }
 }
 
-void present_immediate(const std::uint32_t* source, const TouchState& touch) {
-    std::fill(staging.begin(), staging.end(), 0x090B1000u);
+std::uint16_t glyph_bits(char glyph) {
+    // Compact 3x5 font. Bits are stored left-to-right, top-to-bottom.
+    switch (glyph) {
+    case '0': return 0x7B6Fu; // 111 101 101 101 111
+    case '1': return 0x2C97u; // 010 110 010 010 111
+    case '2': return 0x73E7u; // 111 001 111 100 111
+    case '3': return 0x73CFu; // 111 001 111 001 111
+    case '4': return 0x5BC9u; // 101 101 111 001 001
+    case '5': return 0x79CFu; // 111 100 111 001 111
+    case '6': return 0x79EFu; // 111 100 111 101 111
+    case '7': return 0x7292u; // 111 001 010 010 010
+    case '8': return 0x7BEFu; // 111 101 111 101 111
+    case '9': return 0x7BCFu; // 111 101 111 001 111
+    case 'F': return 0x79E4u; // 111 100 111 100 100
+    case 'P': return 0x7BE4u; // 111 101 111 100 100
+    case 'S': return 0x79CFu; // 111 100 111 001 111
+    case '.': return 0x0002u; // bottom-center pixel
+    default: return 0;
+    }
+}
+
+void fill_rect(const Framebuffer& framebuffer, int left, int top,
+               int width, int height, std::uint32_t color) {
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            put_pixel(framebuffer, left + x, top + y, color);
+}
+
+void draw_glyph(const Framebuffer& framebuffer, char glyph, int left, int top,
+                int scale, std::uint32_t color) {
+    const std::uint16_t bits = glyph_bits(glyph);
+    for (int row = 0; row < 5; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            const int bit = 14 - (row * 3 + column);
+            if (!(bits & (1u << bit))) continue;
+            fill_rect(framebuffer, left + column * scale, top + row * scale,
+                      scale, scale, color);
+        }
+    }
+}
+
+void draw_fps_counter(const Framebuffer& framebuffer,
+                      const PerformanceStats& stats) {
+    const int text_scale = framebuffer.visible_width >= 640 ? 3 : 2;
+    const int advance = 4 * text_scale;
+    const int left = 12;
+    const int top = 12;
+    const int height = 5 * text_scale;
+    const unsigned int fps = stats.fps_tenths;
+    char text[] = {'F', 'P', 'S', ' ', '0', '0', '.', '0'};
+    text[4] = static_cast<char>('0' + ((fps / 100) % 10));
+    text[5] = static_cast<char>('0' + ((fps / 10) % 10));
+    text[7] = static_cast<char>('0' + (fps % 10));
+
+    fill_rect(framebuffer, left - 5, top - 5,
+              static_cast<int>(sizeof(text)) * advance + 6,
+              height + 10, 0x00000000u);
+    for (std::size_t i = 0; i < sizeof(text); ++i) {
+        draw_glyph(framebuffer, text[i], left + static_cast<int>(i) * advance,
+                   top, text_scale, 0x00E6A900u);
+    }
+}
+
+void present_immediate(const std::uint32_t* source, const TouchState& touch,
+                       const PerformanceStats& stats) {
     Framebuffer framebuffer = output;
     framebuffer.pixels = staging.data();
 
@@ -107,6 +171,7 @@ void present_immediate(const std::uint32_t* source, const TouchState& touch) {
     draw_screen(framebuffer, source + kScreenWidth * kScreenHeight,
                 touch_x, top_y, scale);
     draw_touch_cursor(framebuffer, touch, touch_x, top_y, scale);
+    draw_fps_counter(framebuffer, stats);
 
     const std::size_t byte_count = staging.size() * sizeof(std::uint32_t);
     std::memcpy(output.pixels, staging.data(), byte_count);
@@ -115,7 +180,7 @@ void present_immediate(const std::uint32_t* source, const TouchState& touch) {
 
 extern "C" void xenonds_noods_video_worker() {
     __sync_synchronize();
-    present_immediate(queued_frame, queued_touch);
+    present_immediate(queued_frame, queued_touch, queued_stats);
     __sync_synchronize();
 }
 
@@ -139,6 +204,10 @@ bool initialize_noods_video() {
     output.padded_height = (output.visible_height + 31) & ~31;
     staging.resize(static_cast<std::size_t>(output.padded_width) *
                    output.padded_height);
+    // Screen rectangles overwrite themselves every frame, and the counter
+    // clears its own backing rectangle. The surrounding matte is static, so
+    // initialize it once instead of clearing a padded framebuffer every frame.
+    std::fill(staging.begin(), staging.end(), 0x090B1000u);
     initialized = true;
     return true;
 }
@@ -150,12 +219,14 @@ void wait_for_noods_video() {
     __sync_synchronize();
 }
 
-void present_noods_frame(const std::uint32_t* pixels, const TouchState& touch) {
+void present_noods_frame(const std::uint32_t* pixels, const TouchState& touch,
+                         const PerformanceStats& stats) {
     if (!initialized || !pixels) return;
 
     wait_for_noods_video();
     std::memcpy(queued_frame, pixels, sizeof(queued_frame));
     queued_touch = touch;
+    queued_stats = stats;
     __sync_synchronize();
 
     void* stack_top = worker_stack + sizeof(worker_stack) - 256;

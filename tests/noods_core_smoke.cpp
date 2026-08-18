@@ -2,6 +2,8 @@
 #include "core.h"
 #include "settings.h"
 
+#include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -34,12 +36,17 @@ std::size_t count_red_pixels() {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2 || argc > 3) {
-        std::fprintf(stderr, "usage: noods_core_smoke ROM.nds [--boot]\n");
+    if (argc < 2 || argc > 4) {
+        std::fprintf(stderr,
+                     "usage: noods_core_smoke ROM.nds [--boot | --benchmark FRAMES]\n");
         return 2;
     }
     const bool boot_probe = argc == 3 && std::strcmp(argv[2], "--boot") == 0;
-    if (argc == 3 && !boot_probe) {
+    const bool benchmark = argc == 4 &&
+        std::strcmp(argv[2], "--benchmark") == 0;
+    const int benchmark_frames = benchmark ? std::atoi(argv[3]) : 0;
+    if ((argc == 3 && !boot_probe) ||
+        (argc == 4 && (!benchmark || benchmark_frames < 1))) {
         std::fprintf(stderr, "unknown mode: %s\n", argv[2]);
         return 2;
     }
@@ -62,6 +69,33 @@ int main(int argc, char** argv) {
 
     try {
         Core* core = new Core(argv[1]);
+
+        if (benchmark) {
+            // Warm caches and one-time core paths before measuring steady-state
+            // emulation. Frame retrieval remains in the loop because it is part
+            // of the Xbox frontend's per-frame core cost.
+            for (int frame = 0; frame < 10; ++frame) {
+                do {
+                    core->runCore();
+                } while (!core->gpu.getFrame(framebuffer, false));
+            }
+
+            const std::chrono::steady_clock::time_point start =
+                std::chrono::steady_clock::now();
+            for (int frame = 0; frame < benchmark_frames; ++frame) {
+                do {
+                    core->runCore();
+                } while (!core->gpu.getFrame(framebuffer, false));
+            }
+            const std::chrono::duration<double> elapsed =
+                std::chrono::steady_clock::now() - start;
+            const double fps = benchmark_frames / elapsed.count();
+            std::printf("BENCH frames=%d seconds=%.6f fps=%.2f hash=%08X\n",
+                        benchmark_frames, elapsed.count(), fps, hash_frame());
+            delete core;
+            return 0;
+        }
+
         const int frame_limit = boot_probe ? 300 : 3;
         bool saw_content = false;
         std::uint32_t first_hash = 0;
@@ -70,7 +104,7 @@ int main(int argc, char** argv) {
         for (int frame = 0; frame < frame_limit; ++frame) {
             core->runCore();
             if (!core->gpu.getFrame(framebuffer, false)) {
-                if (boot_probe)
+                if (boot_probe || frames_received == 0)
                     continue;
                 std::fprintf(stderr, "frame %d was not queued\n", frame);
                 delete core;

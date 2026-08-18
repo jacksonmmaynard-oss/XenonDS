@@ -26,6 +26,7 @@
 namespace {
 
 const unsigned long kTargetFrameMicroseconds = 16715;
+const unsigned int kStatsWindowFrames = 30;
 const unsigned int kBlankFrameLimit = 600;
 const std::uint32_t kUnknownOpcodeLimit = 4096;
 std::uint32_t ds_frame[xenonds::kCombinedPixelCount];
@@ -147,7 +148,7 @@ int main() {
     xenon_ata_init();
     xenon_atapi_init();
 
-    std::printf("XenonDS NooDS playable integration v0.7.0\n");
+    std::printf("XenonDS NooDS performance integration v0.7.1\n");
     if (!xenonds::xenon::initialize_noods_video()) {
         fail("Xbox framebuffer information is invalid");
         return 1;
@@ -195,6 +196,10 @@ int main() {
     unsigned int blank_frames = 0;
     bool saw_content = false;
     std::uint64_t last_frame_tick = mftb();
+    std::uint64_t stats_window_tick = last_frame_tick;
+    unsigned long stats_core_microseconds = 0;
+    unsigned int stats_frames = 0;
+    xenonds::xenon::PerformanceStats performance;
 
     for (;;) {
         usb_do_poll();
@@ -209,6 +214,7 @@ int main() {
 
         input = mapper.map(snapshot_from_pad(pad));
         apply_input(*core, input);
+        const std::uint64_t core_start_tick = mftb();
         try {
             core->runCore();
         }
@@ -230,15 +236,36 @@ int main() {
             fail("Unexpected exception while running the game");
             return 1;
         }
+        const unsigned long core_elapsed =
+            tb_diff_usec(mftb(), core_start_tick);
 
         const bool frame_ready = core->gpu.getFrame(ds_frame, false);
         if (frame_ready) {
+            stats_core_microseconds += core_elapsed;
+            ++stats_frames;
+            if (stats_frames >= kStatsWindowFrames) {
+                const unsigned long window_microseconds =
+                    tb_diff_usec(mftb(), stats_window_tick);
+                if (window_microseconds != 0) {
+                    performance.fps_tenths = static_cast<unsigned int>(
+                        (static_cast<unsigned long long>(stats_frames) *
+                         10000000ULL + window_microseconds / 2) /
+                        window_microseconds);
+                }
+                performance.core_microseconds =
+                    stats_core_microseconds / stats_frames;
+                stats_window_tick = mftb();
+                stats_core_microseconds = 0;
+                stats_frames = 0;
+            }
+
             if (!saw_content) {
                 saw_content = frame_has_content(ds_frame);
                 if (!saw_content)
                     ++blank_frames;
             }
-            xenonds::xenon::present_noods_frame(ds_frame, input.touch);
+            xenonds::xenon::present_noods_frame(
+                ds_frame, input.touch, performance);
 
             // Pace actual DS video frames, not internal scheduler slices.
             // NooDS may require many runCore() calls before a frame is ready.

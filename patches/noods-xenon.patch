@@ -1,6 +1,476 @@
+diff --git a/src/core/arm/interpreter.cpp b/src/core/arm/interpreter.cpp
+index 9831699..32e4570 100644
+--- a/src/core/arm/interpreter.cpp
++++ b/src/core/arm/interpreter.cpp
+@@ -19,6 +19,45 @@
+
+ #include "../core.h"
+
++namespace {
++
++FORCE_INLINE bool continueCore(Core &core) {
++#ifdef NOODS_XENON
++    // Xbox emulation owns Core::running on this hardware thread. Relaxed
++    // ordering preserves the atomic state transition without paying for a
++    // full PowerPC memory barrier at every scheduler event.
++    return core.running.exchange(true, std::memory_order_relaxed);
++#else
++    return core.running.exchange(true);
++#endif
++}
++
++FORCE_INLINE uint32_t nextEventCycles(Core &core) {
++#ifdef NOODS_XENON
++    return core.events.back().cycles;
++#else
++    return core.events.front().cycles;
++#endif
++}
++
++FORCE_INLINE void runScheduledEvents(Core &core) {
++    core.globalCycles = nextEventCycles(core);
++    while (nextEventCycles(core) <= core.globalCycles) {
++#ifdef NOODS_XENON
++        // Xenon's queue is reverse-sorted, so removing the earliest event is
++        // O(1). Pop before invoking it because callbacks may schedule events.
++        const SchedTask task = core.events.back().task;
++        core.events.pop_back();
++        core.tasks[task]();
++#else
++        core.tasks[core.events.front().task]();
++        core.events.erase(core.events.begin());
++#endif
++    }
++}
++
++} // namespace
++
+ Interpreter::Interpreter(Core *core, bool arm7): core(core), arm7(arm7) {
+     // Initialize the registers for user mode
+     for (int i = 0; i < 32; i++)
+@@ -108,13 +147,9 @@ void Interpreter::resetCycles() {
+
+ void Interpreter::runCoreNone(Core &core) {
+     // Run the core with no active CPUs
+-    while (core.running.exchange(true)) {
++    while (continueCore(core)) {
+         // Jump to the next task and run all that are scheduled now
+-        core.globalCycles = core.events[0].cycles;
+-        while (core.events[0].cycles <= core.globalCycles) {
+-            core.tasks[core.events[0].task]();
+-            core.events.erase(core.events.begin());
+-        }
++        runScheduledEvents(core);
+     }
+ }
+
+@@ -124,18 +159,14 @@ template void Interpreter::runCoreSingle<true, 1>(Core &core);
+ template <bool _arm7, int shift> void Interpreter::runCoreSingle(Core &core) {
+     // Run the core with one active CPU
+     Interpreter &arm = core.interpreter[_arm7];
+-    while (core.running.exchange(true)) {
++    while (continueCore(core)) {
+         // Run a CPU until the next scheduled task
+         core.globalCycles = std::max(core.globalCycles, arm.cycles);
+-        while (core.events[0].cycles > arm.cycles)
++        while (nextEventCycles(core) > arm.cycles)
+             arm.cycles = (core.globalCycles += arm.runOpcode() << shift);
+
+         // Jump to the next task and run all that are scheduled now
+-        core.globalCycles = core.events[0].cycles;
+-        while (core.events[0].cycles <= core.globalCycles) {
+-            core.tasks[core.events[0].task]();
+-            core.events.erase(core.events.begin());
+-        }
++        runScheduledEvents(core);
+     }
+ }
+
+@@ -143,9 +174,9 @@ void Interpreter::runCoreNds(Core &core) {
+     // Run the core with both CPUs active in NDS mode
+     Interpreter &arm9 = core.interpreter[0];
+     Interpreter &arm7 = core.interpreter[1];
+-    while (core.running.exchange(true)) {
++    while (continueCore(core)) {
+         // Run the ARM9 and half-speed ARM7 until the next scheduled task
+-        while (core.events[0].cycles > core.globalCycles) {
++        while (nextEventCycles(core) > core.globalCycles) {
+             if (core.globalCycles >= arm9.cycles)
+                 arm9.cycles = core.globalCycles + arm9.runOpcode();
+             if (core.globalCycles >= arm7.cycles)
+@@ -154,11 +185,7 @@ void Interpreter::runCoreNds(Core &core) {
+         }
+
+         // Jump to the next task and run all that are scheduled now
+-        core.globalCycles = core.events[0].cycles;
+-        while (core.events[0].cycles <= core.globalCycles) {
+-            core.tasks[core.events[0].task]();
+-            core.events.erase(core.events.begin());
+-        }
++        runScheduledEvents(core);
+     }
+ }
+
+@@ -166,9 +193,9 @@ void Interpreter::runCoreDsi(Core &core) {
+     // Run the core in DSi mode
+     Interpreter &arm9 = core.interpreter[0];
+     Interpreter &arm7 = core.interpreter[1];
+-    while (core.running.exchange(true)) {
++    while (continueCore(core)) {
+         // Run both CPUs until the next scheduled task
+-        while (core.events[0].cycles > core.globalCycles) {
++        while (nextEventCycles(core) > core.globalCycles) {
+             // Run the ARM9 twice as fast as usual
+             if (core.globalCycles >= arm9.cycles) {
+                 int cycles = arm9.runOpcode() + arm9.dsiCycle;
+@@ -183,11 +210,7 @@ void Interpreter::runCoreDsi(Core &core) {
+         }
+
+         // Jump to the next task and run all that are scheduled now
+-        core.globalCycles = core.events[0].cycles;
+-        while (core.events[0].cycles <= core.globalCycles) {
+-            core.tasks[core.events[0].task]();
+-            core.events.erase(core.events.begin());
+-        }
++        runScheduledEvents(core);
+     }
+ }
+
+@@ -199,21 +222,147 @@ FORCE_INLINE int Interpreter::runOpcode() {
+     // Execute an instruction
+     if (cpsr & BIT(5)) { // THUMB mode
+         // Increment the program counter and fill the pipeline from pointer or fallback
+-        pipeline[1] = (((*registers[15] += 2) & 0xFFE) && pcData) ? U8TO16(pcData += 2, 0) : getOpcode16();
+-
+-        // Execute a THUMB instruction
++        pipeline[1] = (((*registers[15] += 2) & 0xFFE) && pcData) ?
++            readLe16Aligned(pcData += 2) : getOpcode16();
++
++        // Execute a THUMB instruction through a branch-friendly decoder. The
++        // stock member-pointer table is compact, but its indirect call is very
++        // expensive on Xenon's in-order PowerPC cores.
++#ifdef NOODS_XENON
++        return runThumbOpcode(opcode);
++#else
+         return (this->*thumbInstrs[(opcode >> 6) & 0x3FF])(opcode);
++#endif
+     }
+     else { // ARM mode
+         // Increment the program counter and fill the pipeline from pointer or fallback
+-        pipeline[1] = (((*registers[15] += 4) & 0xFFC) && pcData) ? U8TO32(pcData += 4, 0) : getOpcode32();
++        pipeline[1] = (((*registers[15] += 4) & 0xFFC) && pcData) ?
++            readLe32Aligned(pcData += 4) : getOpcode32();
+
+         // Execute an ARM instruction based on its condition
+         switch (condition[((opcode >> 24) & 0xF0) | (cpsr >> 28)]) {
+             case 0: return 1; // False
+             case 2: return handleReserved(opcode); // Reserved
+-            default: return (this->*armInstrs[((opcode >> 16) & 0xFF0) | ((opcode >> 4) & 0xF)])(opcode);
++            default:
++#ifdef NOODS_XENON
++                // ARM branches dominate tight game loops. Bypass the generic
++                // member-pointer table for branch, branch-with-link, and SWI.
++                switch (opcode & 0x0F000000u) {
++                case 0x0A000000u: return b(opcode);
++                case 0x0B000000u: return bl(opcode);
++                case 0x0F000000u: return swi(opcode);
++                default: break;
++                }
++#endif
++                return (this->*armInstrs[((opcode >> 16) & 0xFF0) |
++                                         ((opcode >> 4) & 0xF)])(opcode);
++        }
++    }
++}
++
++FORCE_INLINE int Interpreter::runThumbOpcode(uint16_t opcode) {
++    const unsigned int index = opcode >> 6;
++
++    // Most THUMB encodings occupy contiguous 32-entry groups. Decoding those
++    // groups with a small switch turns an unpredictable member-pointer call
++    // into direct, inlineable calls while preserving the exact NooDS handlers.
++    switch (index >> 5) {
++    case 0x00: return lslImmT(opcode);
++    case 0x01: return lsrImmT(opcode);
++    case 0x02: return asrImmT(opcode);
++    case 0x03:
++        switch ((index >> 3) & 0x3) {
++        case 0: return addRegT(opcode);
++        case 1: return subRegT(opcode);
++        case 2: return addImm3T(opcode);
++        default: return subImm3T(opcode);
++        }
++    case 0x04: return movImm8T(opcode);
++    case 0x05: return cmpImm8T(opcode);
++    case 0x06: return addImm8T(opcode);
++    case 0x07: return subImm8T(opcode);
++    case 0x09: return ldrPcT(opcode);
++    case 0x0A:
++    case 0x0B:
++        switch (index >> 3) {
++        case 0x28: return strRegT(opcode);
++        case 0x29: return strhRegT(opcode);
++        case 0x2A: return strbRegT(opcode);
++        case 0x2B: return ldrsbRegT(opcode);
++        case 0x2C: return ldrRegT(opcode);
++        case 0x2D: return ldrhRegT(opcode);
++        case 0x2E: return ldrbRegT(opcode);
++        default: return ldrshRegT(opcode);
++        }
++    case 0x0C: return strImm5T(opcode);
++    case 0x0D: return ldrImm5T(opcode);
++    case 0x0E: return strbImm5T(opcode);
++    case 0x0F: return ldrbImm5T(opcode);
++    case 0x10: return strhImm5T(opcode);
++    case 0x11: return ldrhImm5T(opcode);
++    case 0x12: return strSpT(opcode);
++    case 0x13: return ldrSpT(opcode);
++    case 0x14: return addPcT(opcode);
++    case 0x15: return addSpT(opcode);
++    case 0x18: return stmiaT(opcode);
++    case 0x19: return ldmiaT(opcode);
++    case 0x1A:
++    case 0x1B:
++        switch (index >> 2) {
++        case 0xD0: return beqT(opcode);
++        case 0xD1: return bneT(opcode);
++        case 0xD2: return bcsT(opcode);
++        case 0xD3: return bccT(opcode);
++        case 0xD4: return bmiT(opcode);
++        case 0xD5: return bplT(opcode);
++        case 0xD6: return bvsT(opcode);
++        case 0xD7: return bvcT(opcode);
++        case 0xD8: return bhiT(opcode);
++        case 0xD9: return blsT(opcode);
++        case 0xDA: return bgeT(opcode);
++        case 0xDB: return bltT(opcode);
++        case 0xDC: return bgtT(opcode);
++        case 0xDD: return bleT(opcode);
++        case 0xDF: return swiT(opcode);
++        default: return unkThumb(opcode);
+         }
++    case 0x1C: return bT(opcode);
++    case 0x1D: return blxOffT(opcode);
++    case 0x1E: return blSetupT(opcode);
++    case 0x1F: return blOffT(opcode);
++    default: break;
++    }
++
++    // Mixed groups are still direct-decoded where doing so stays compact.
++    if (index >= 0x110 && index <= 0x113) return addHT(opcode);
++    if (index >= 0x114 && index <= 0x117) return cmpHT(opcode);
++    if (index >= 0x118 && index <= 0x11B) return movHT(opcode);
++    if (index >= 0x11C && index <= 0x11D) return bxRegT(opcode);
++    if (index >= 0x11E && index <= 0x11F) return blxRegT(opcode);
++    if (index >= 0x2C0 && index <= 0x2C3) return addSpImmT(opcode);
++    if (index >= 0x2D0 && index <= 0x2D3) return pushT(opcode);
++    if (index >= 0x2D4 && index <= 0x2D7) return pushLrT(opcode);
++    if (index >= 0x2F0 && index <= 0x2F3) return popT(opcode);
++    if (index >= 0x2F4 && index <= 0x2F7) return popPcT(opcode);
++
++    switch (index) {
++    case 0x100: return andDpT(opcode);
++    case 0x101: return eorDpT(opcode);
++    case 0x102: return lslDpT(opcode);
++    case 0x103: return lsrDpT(opcode);
++    case 0x104: return asrDpT(opcode);
++    case 0x105: return adcDpT(opcode);
++    case 0x106: return sbcDpT(opcode);
++    case 0x107: return rorDpT(opcode);
++    case 0x108: return tstDpT(opcode);
++    case 0x109: return negDpT(opcode);
++    case 0x10A: return cmpDpT(opcode);
++    case 0x10B: return cmnDpT(opcode);
++    case 0x10C: return orrDpT(opcode);
++    case 0x10D: return mulDpT(opcode);
++    case 0x10E: return bicDpT(opcode);
++    case 0x10F: return mvnDpT(opcode);
++    default: return (this->*thumbInstrs[index])(opcode);
+     }
+ }
+
+@@ -222,7 +371,7 @@ uint16_t Interpreter::getOpcode16() {
+     if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[*registers[15] >> 12]))
+         return core->memory.read<uint16_t>(arm7, *registers[15]);
+     pcData += (*registers[15] & 0xFFE);
+-    return U8TO16(pcData, 0);
++    return readLe16Aligned(pcData);
+ }
+
+ uint32_t Interpreter::getOpcode32() {
+@@ -230,7 +379,7 @@ uint32_t Interpreter::getOpcode32() {
+     if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[*registers[15] >> 12]))
+         return core->memory.read<uint32_t>(arm7, *registers[15]);
+     pcData += (*registers[15] & 0xFFC);
+-    return U8TO32(pcData, 0);
++    return readLe32Aligned(pcData);
+ }
+
+ void Interpreter::halt(int bit) {
+@@ -446,12 +595,16 @@ int Interpreter::finishHleIrq() {
+
+ int Interpreter::unkArm(uint32_t opcode) {
+     // Handle an unknown ARM opcode
++    unknownOpcodeCount++;
++    lastUnknownOpcode = opcode;
+     LOG_CRIT("Unknown ARM%d ARM opcode: 0x%X\n", arm7 ? 7 : 9, opcode);
+     return 1;
+ }
+
+ int Interpreter::unkThumb(uint16_t opcode) {
+     // Handle an unknown THUMB opcode
++    unknownOpcodeCount++;
++    lastUnknownOpcode = opcode;
+     LOG_CRIT("Unknown ARM%d THUMB opcode: 0x%X\n", arm7 ? 7 : 9, opcode);
+     return 1;
+ }
+diff --git a/src/core/arm/interpreter.h b/src/core/arm/interpreter.h
+index 08d0da2..9d3b49f 100644
+--- a/src/core/arm/interpreter.h
++++ b/src/core/arm/interpreter.h
+@@ -30,6 +30,8 @@ public:
+     HleBios *bios = nullptr;
+     uint32_t entryAddr = 0;
+     uint8_t halted = 0;
++    uint32_t unknownOpcodeCount = 0;
++    uint32_t lastUnknownOpcode = 0;
+
+     Interpreter(Core *core, bool arm7);
+     void saveState(FILE *file);
+@@ -98,6 +100,7 @@ private:
+     static const uint8_t bitCount[0x100];
+
+     int runOpcode();
++    int runThumbOpcode(uint16_t opcode);
+     int exception(uint8_t vector);
+     void flushPipeline();
+     void swapRegisters(uint32_t value);
+diff --git a/src/core/arm/interpreter_alu.cpp b/src/core/arm/interpreter_alu.cpp
+index 605f914..92ec2d4 100644
+--- a/src/core/arm/interpreter_alu.cpp
++++ b/src/core/arm/interpreter_alu.cpp
+@@ -134,14 +134,14 @@ FORCE_INLINE uint32_t Interpreter::rrr(uint32_t opcode) { // Rm,ROR Rs
+     // When used as Rm, the program counter is read with +4
+     uint32_t value = *registers[opcode & 0xF] + (((opcode & 0xF) == 0xF) << 2);
+     uint8_t shift = *registers[(opcode >> 8) & 0xF];
+-    return (value << (32 - (shift & 0x1F))) | (value >> ((shift & 0x1F)));
++    return rotateRight32(value, shift);
+ }
+
+ FORCE_INLINE uint32_t Interpreter::imm(uint32_t opcode) { // #i
+     // Rotate 8-bit immediate right by a multiple of 2
+     uint32_t value = opcode & 0xFF;
+     uint8_t shift = (opcode >> 7) & 0x1E;
+-    return (value << (32 - shift)) | (value >> shift);
++    return rotateRight32(value, shift);
+ }
+
+ FORCE_INLINE uint32_t Interpreter::lliS(uint32_t opcode) { // Rm,LSL #i (S)
+@@ -213,7 +213,7 @@ FORCE_INLINE uint32_t Interpreter::rrrS(uint32_t opcode) { // Rm,ROR Rs (S)
+     uint32_t value = *registers[opcode & 0xF] + (((opcode & 0xF) == 0xF) << 2);
+     uint8_t shift = *registers[(opcode >> 8) & 0xF];
+     if (shift > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(value & BIT((shift - 1) & 0x1F)) << 29);
+-    return (value << (32 - (shift & 0x1F))) | (value >> ((shift & 0x1F)));
++    return rotateRight32(value, shift);
+ }
+
+ FORCE_INLINE uint32_t Interpreter::immS(uint32_t opcode) { // #i (S)
+@@ -221,7 +221,7 @@ FORCE_INLINE uint32_t Interpreter::immS(uint32_t opcode) { // #i (S)
+     uint32_t value = opcode & 0xFF;
+     uint8_t shift = (opcode >> 7) & 0x1E;
+     if (shift > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(value & BIT(shift - 1)) << 29);
+-    return (value << (32 - shift)) | (value >> shift);
++    return rotateRight32(value, shift);
+ }
+
+ FORCE_INLINE int Interpreter::_and(uint32_t opcode, uint32_t op2) { // AND Rd,Rn,op2
+@@ -1231,7 +1231,7 @@ int Interpreter::rorDpT(uint16_t opcode) { // ROR Rd,Rs
+     uint32_t *op0 = registers[opcode & 0x7];
+     uint32_t op1 = *registers[opcode & 0x7];
+     uint8_t op2 = *registers[(opcode >> 3) & 0x7];
+-    *op0 = (*op0 << (32 - (op2 & 0x1F))) | (*op0 >> (op2 & 0x1F));
++    *op0 = rotateRight32(*op0, op2);
+     cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
+     if (op2 > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(op1 & BIT((op2 - 1) & 0x1F)) << 29);
+     return 1;
+diff --git a/src/core/arm/interpreter_transfer.cpp b/src/core/arm/interpreter_transfer.cpp
+index 90c22bd..488ef76 100644
+--- a/src/core/arm/interpreter_transfer.cpp
++++ b/src/core/arm/interpreter_transfer.cpp
+@@ -1118,7 +1118,7 @@ int Interpreter::msrIc(uint32_t opcode) { // MSR CPSR,#i
+     // Rotate the immediate value
+     uint32_t value = opcode & 0xFF;
+     uint8_t shift = (opcode >> 7) & 0x1E;
+-    uint32_t op1 = (value << (32 - shift)) | (value >> shift);
++    uint32_t op1 = rotateRight32(value, shift);
+
+     // Write the first 8 bits of the status flags, only changing the CPU mode when not in user mode
+     if (opcode & BIT(16)) {
+@@ -1139,7 +1139,7 @@ int Interpreter::msrIs(uint32_t opcode) { // MSR SPSR,#i
+     if (!spsr) return 1;
+     uint32_t value = opcode & 0xFF;
+     uint8_t shift = (opcode >> 7) & 0x1E;
+-    uint32_t op1 = (value << (32 - shift)) | (value >> shift);
++    uint32_t op1 = rotateRight32(value, shift);
+
+     // Write the saved status flags in 8-bit blocks
+     for (int i = 0; i < 4; i++) {
+diff --git a/src/core/core.cpp b/src/core/core.cpp
+index 8949d6e..2ad4f45 100644
+--- a/src/core/core.cpp
++++ b/src/core/core.cpp
+@@ -85,7 +85,15 @@ Core::Core(std::string ndsRom, std::string gbaRom, int id, int ndsRomFd, int gba
+     schedule(RESET_CYCLES, 0x7FFFFFFF);
+     schedule(NDS_SCANLINE256, 256 * 6);
+     schedule(NDS_SCANLINE355, 355 * 6);
++#ifdef NOODS_XENON
++    // The current Xbox frontend has no audio sink. Avoid waking the scheduler
++    // 32,768 times per emulated second merely to manufacture discarded dummy
++    // samples; audio-enabled builds retain the original sample clock.
++    if (Settings::emulateAudio)
++        schedule(NDS_SPU_SAMPLE, 512 * 2);
++#else
+     schedule(NDS_SPU_SAMPLE, 512 * 2);
++#endif
+
+     // Initialize memory maps and anything else that needs it
+     memory.updateMap9(0x00000000, 0xFFFFFFFF);
+@@ -368,7 +376,17 @@ void Core::resetCycles() {
+ void Core::schedule(SchedTask task, uint32_t cycles) {
+     // Add a task to the scheduler, sorted by least to most cycles until execution
+     SchedEvent event(task, globalCycles + cycles);
++#ifdef NOODS_XENON
++    // Keep the earliest event at the back on Xbox. The interpreter consumes
++    // hundreds of events per frame, and pop_back avoids shifting the vector on
++    // every dispatch. lower_bound keeps older equal-cycle events first.
++    auto it = std::lower_bound(events.begin(), events.end(), event,
++        [](const SchedEvent &left, const SchedEvent &right) {
++            return left.cycles > right.cycles;
++        });
++#else
+     auto it = std::upper_bound(events.cbegin(), events.cend(), event);
++#endif
+     events.insert(it, event);
+ }
+
+@@ -383,7 +401,12 @@ void Core::enterGbaMode() {
+     schedule(RESET_CYCLES, 1);
+     schedule(GBA_SCANLINE240, 240 * 4);
+     schedule(GBA_SCANLINE308, 308 * 4);
++#ifdef NOODS_XENON
++    if (Settings::emulateAudio)
++        schedule(GBA_SPU_SAMPLE, 512);
++#else
+     schedule(GBA_SPU_SAMPLE, 512);
++#endif
+
+     // Reset the system for GBA mode
+     memory.updateMap7(0x00000000, 0xFFFFFFFF);
+diff --git a/src/core/defines.h b/src/core/defines.h
+index 215d3a5..2be8f7e 100644
 --- a/src/core/defines.h
 +++ b/src/core/defines.h
-@@ -78,25 +78,55 @@
+@@ -78,25 +78,93 @@
      b = c; \
  }
 
@@ -24,24 +494,48 @@
  #endif
 +    return value;
 +}
-+
-+FORCE_INLINE uint32_t readLe32(const void *data) {
-+    uint32_t value;
-+    __builtin_memcpy(&value, data, sizeof(value));
-+#ifdef ENDIAN_BIG
-+    value = __builtin_bswap32(value);
-+#endif
-+    return value;
-+}
 
 -// Macro that stores a 32-bit value to an 8-bit array
-+FORCE_INLINE uint64_t readLe64(const void *data) {
-+    uint64_t value;
++FORCE_INLINE uint32_t readLe32(const void *data) {
++    uint32_t value;
 +    __builtin_memcpy(&value, data, sizeof(value));
  #ifdef ENDIAN_BIG
 -#define U32TO8(data, index, value) (*(uint32_t*)&(data)[index] = __builtin_bswap32(value))
 -#else
 -#define U32TO8(data, index, value) (*(uint32_t*)&(data)[index] = (value))
++    value = __builtin_bswap32(value);
++#endif
++    return value;
++}
++
++// The interpreter and mapped-memory paths always align 16/32-bit addresses
++// before reaching these helpers. Tell the compiler that explicitly so Xenon
++// uses one native-width load plus a byte swap instead of rebuilding every
++// value from four byte loads. The may_alias typedefs keep the access valid
++// when the underlying storage is a byte array.
++typedef uint16_t AliasUint16 __attribute__((may_alias));
++typedef uint32_t AliasUint32 __attribute__((may_alias));
++
++FORCE_INLINE uint16_t readLe16Aligned(const void *data) {
++    uint16_t value = *static_cast<const AliasUint16*>(data);
++#ifdef ENDIAN_BIG
++    value = __builtin_bswap16(value);
++#endif
++    return value;
++}
++
++FORCE_INLINE uint32_t readLe32Aligned(const void *data) {
++    uint32_t value = *static_cast<const AliasUint32*>(data);
++#ifdef ENDIAN_BIG
++    value = __builtin_bswap32(value);
++#endif
++    return value;
++}
++
++FORCE_INLINE uint64_t readLe64(const void *data) {
++    uint64_t value;
++    __builtin_memcpy(&value, data, sizeof(value));
++#ifdef ENDIAN_BIG
 +    value = __builtin_bswap64(value);
  #endif
 +    return value;
@@ -52,6 +546,20 @@
 +    value = __builtin_bswap32(value);
 +#endif
 +    __builtin_memcpy(data, &value, sizeof(value));
++}
++
++FORCE_INLINE void writeLe16Aligned(void *data, uint16_t value) {
++#ifdef ENDIAN_BIG
++    value = __builtin_bswap16(value);
++#endif
++    *static_cast<AliasUint16*>(data) = value;
++}
++
++FORCE_INLINE void writeLe32Aligned(void *data, uint32_t value) {
++#ifdef ENDIAN_BIG
++    value = __builtin_bswap32(value);
++#endif
++    *static_cast<AliasUint32*>(data) = value;
 +}
 +
 +#define U8TO16(data, index) readLe16(&(data)[index])
@@ -69,75 +577,46 @@
  #define ROL32(v, s) ((v << s) | (v >> (32 - s)))
 -#define ROR32(v, s) ((v >> s) | (v << (32 - s)))
 +#define ROR32(v, s) rotateRight32((v), (s))
---- a/src/core/memory/memory.h
-+++ b/src/core/memory/memory.h
-@@ -162,7 +162,7 @@
-         T value = 0;
-         data += address & (0x1000 - sizeof(T));
-         for (uint32_t i = 0; i < sizeof(T); i++)
--            value |= data[i] << (i * 8);
-+            value |= static_cast<T>(data[i]) << (i * 8);
-         return value;
+diff --git a/src/core/io/aes.cpp b/src/core/io/aes.cpp
+index 2aeaec5..1e17077 100644
+--- a/src/core/io/aes.cpp
++++ b/src/core/io/aes.cpp
+@@ -38,7 +38,8 @@ Aes::Aes(Core *core): core(core) {
+     // Generate the AES forward and reverse tables
+     for (int i = 0; i < 0x100; i++) {
+         uint8_t x = (fsBox[i] << 1) ^ ((fsBox[i] & 0x80) ? 0x11B : 0);
+-        fTable[i] = (fsBox[i] * 0x10101) ^ (x * 0x1000001);
++        fTable[i] = (static_cast<uint32_t>(fsBox[i]) * 0x10101u) ^
++            (static_cast<uint32_t>(x) * 0x1000001u);
+         rTable[i] = (x = rsBox[i]) ? (pow[(log[x] + log[0xE]) % 0xFF] << 24) | (pow[(log[x] + log[0x9]) % 0xFF] << 16) |
+             (pow[(log[x] + log[0xD]) % 0xFF] << 8) | pow[(log[x] + log[0xB]) % 0xFF] : 0;
      }
+diff --git a/src/core/io/spu.cpp b/src/core/io/spu.cpp
+index eddacd2..2192079 100644
+--- a/src/core/io/spu.cpp
++++ b/src/core/io/spu.cpp
+@@ -197,6 +197,9 @@ uint32_t *Spu::getSamples(int count) {
 
---- a/src/core/memory/memory.cpp
-+++ b/src/core/memory/memory.cpp
-@@ -59,7 +59,7 @@
-     T value = 0;
-     for (uint8_t m = 0; m < count; m++)
-         for (uint32_t i = 0; i < sizeof(T); i++)
--            value |= mappings[m][address + i] << (i * 8);
-+            value |= static_cast<T>(mappings[m][address + i]) << (i * 8);
-     return value;
- }
+ void Spu::runGbaSample() {
+     // Push a dummy sample if disabled and schedule the next one
++#ifdef NOODS_XENON
++    if (!Settings::emulateAudio) return;
++#endif
+     core->schedule(GBA_SPU_SAMPLE, 512);
+     if (!Settings::emulateAudio) return pushSample(0, 0);
 
-@@ -206,8 +206,11 @@
-     // Update the ARM9 read and write memory maps in the given range
-     for (uint64_t address = start; address < end; address += 0x1000) {
-         // Get the current read and write pointers; there are TCM and non-TCM maps
--        uint8_t *&read = (tcm ? readMap9A : readMap9B)[address >> 12];
--        uint8_t *&write = (tcm ? writeMap9A : writeMap9B)[address >> 12];
-+        const uint32_t index = static_cast<uint32_t>(address >> 12);
-+        uint8_t **readMap = tcm ? readMap9A : readMap9B;
-+        uint8_t **writeMap = tcm ? writeMap9A : writeMap9B;
-+        uint8_t *&read = readMap[index];
-+        uint8_t *&write = writeMap[index];
-         read = write = nullptr;
+@@ -425,6 +428,9 @@ void Spu::runGbaSample() {
 
-         // Map a 4KB block to the corresponding ARM9 memory, excluding special cases
-@@ -310,8 +313,9 @@
-     // Update the ARM7 read and write memory maps in the given range
-     for (uint64_t address = start; address < end; address += 0x1000) {
-         // Get the current read and write pointers
--        uint8_t *&read = readMap7[address >> 12];
--        uint8_t *&write = writeMap7[address >> 12];
-+        const uint32_t index = static_cast<uint32_t>(address >> 12);
-+        uint8_t *&read = readMap7[index];
-+        uint8_t *&write = writeMap7[index];
-         read = write = nullptr;
+ void Spu::runSample() {
+     // Push a dummy sample if disabled and schedule the next one
++#ifdef NOODS_XENON
++    if (!Settings::emulateAudio) return;
++#endif
+     core->schedule(NDS_SPU_SAMPLE, 512 * 2);
+     if (!Settings::emulateAudio) return pushSample(0, 0);
 
-         if (core->gbaMode) { // GBA
-@@ -789,7 +793,7 @@
-     if (data) {
-         T value = 0;
-         for (uint32_t i = 0; i < sizeof(T); i++)
--            value |= data[i] << (i * 8);
-+            value |= static_cast<T>(data[i]) << (i * 8);
-         return value;
-     }
-
-@@ -2285,6 +2289,11 @@
-         LOG_CRIT("Unhandled request for stop mode\n");
- }
-
-+// Keep the byte fallback available to callers in other translation units.
-+// Xenon GCC's -Ofast otherwise removes the only local instantiation while
-+// NooDS' inline fast path still references it from the rest of the core.
-+template void Memory::writeFallback<uint8_t>(bool arm7, uint32_t address, uint8_t value);
-+
- void Memory::writeMbk1(int i, uint8_t value) {
-     // Write to one of the NWRAM-A slot registers and update mappings
-     mbk1[i] = (value & 0x8D);
+diff --git a/src/core/memory/cartridge.cpp b/src/core/memory/cartridge.cpp
+index 45a3a8f..dfbd12f 100644
 --- a/src/core/memory/cartridge.cpp
 +++ b/src/core/memory/cartridge.cpp
 @@ -18,6 +18,7 @@
@@ -148,7 +627,7 @@
  #include "../core.h"
 
  Cartridge::~Cartridge() {
-@@ -58,9 +59,11 @@
+@@ -58,9 +59,11 @@ bool Cartridge::loadRom() {
      // Attempt to open a ROM file
      romFile = (romFd == -1) ? fopen(romPath.c_str(), "rb") : fdopen(dup(romFd), "rb");
      if (!romFile) return false;
@@ -163,7 +642,7 @@
 
      // Attempt to load the ROM's save into memory
      if (FILE *saveFile = (saveFd == -1) ? fopen(savePath.c_str(), "rb") : fdopen(dup(saveFd), "rb")) {
-@@ -80,11 +83,59 @@
+@@ -80,11 +83,59 @@ bool Cartridge::loadRom() {
  }
 
  void Cartridge::loadRomSection(size_t offset, size_t size) {
@@ -228,48 +707,104 @@
      if (!core->dsiMode) core->dldi.patchRom(rom, offset, size);
  }
 
---- a/src/core/arm/interpreter.h
-+++ b/src/core/arm/interpreter.h
-@@ -30,6 +30,8 @@
-     HleBios *bios = nullptr;
-     uint32_t entryAddr = 0;
-     uint8_t halted = 0;
-+    uint32_t unknownOpcodeCount = 0;
-+    uint32_t lastUnknownOpcode = 0;
-
-     Interpreter(Core *core, bool arm7);
-     void saveState(FILE *file);
---- a/src/core/arm/interpreter.cpp
-+++ b/src/core/arm/interpreter.cpp
-@@ -446,12 +446,16 @@
-
- int Interpreter::unkArm(uint32_t opcode) {
-     // Handle an unknown ARM opcode
-+    unknownOpcodeCount++;
-+    lastUnknownOpcode = opcode;
-     LOG_CRIT("Unknown ARM%d ARM opcode: 0x%X\n", arm7 ? 7 : 9, opcode);
-     return 1;
+diff --git a/src/core/memory/memory.cpp b/src/core/memory/memory.cpp
+index 11f752a..a1ff162 100644
+--- a/src/core/memory/memory.cpp
++++ b/src/core/memory/memory.cpp
+@@ -59,7 +59,7 @@ template <typename T> T VramMapping::read(uint32_t address) {
+     T value = 0;
+     for (uint8_t m = 0; m < count; m++)
+         for (uint32_t i = 0; i < sizeof(T); i++)
+-            value |= mappings[m][address + i] << (i * 8);
++            value |= static_cast<T>(mappings[m][address + i]) << (i * 8);
+     return value;
  }
 
- int Interpreter::unkThumb(uint16_t opcode) {
-     // Handle an unknown THUMB opcode
-+    unknownOpcodeCount++;
-+    lastUnknownOpcode = opcode;
-     LOG_CRIT("Unknown ARM%d THUMB opcode: 0x%X\n", arm7 ? 7 : 9, opcode);
-     return 1;
- }
---- a/src/core/io/aes.cpp
-+++ b/src/core/io/aes.cpp
-@@ -38,7 +38,8 @@
-     // Generate the AES forward and reverse tables
-     for (int i = 0; i < 0x100; i++) {
-         uint8_t x = (fsBox[i] << 1) ^ ((fsBox[i] & 0x80) ? 0x11B : 0);
--        fTable[i] = (fsBox[i] * 0x10101) ^ (x * 0x1000001);
-+        fTable[i] = (static_cast<uint32_t>(fsBox[i]) * 0x10101u) ^
-+            (static_cast<uint32_t>(x) * 0x1000001u);
-         rTable[i] = (x = rsBox[i]) ? (pow[(log[x] + log[0xE]) % 0xFF] << 24) | (pow[(log[x] + log[0x9]) % 0xFF] << 16) |
-             (pow[(log[x] + log[0xD]) % 0xFF] << 8) | pow[(log[x] + log[0xB]) % 0xFF] : 0;
+@@ -206,8 +206,11 @@ void Memory::updateMap9(uint32_t start, uint32_t end, bool tcm) {
+     // Update the ARM9 read and write memory maps in the given range
+     for (uint64_t address = start; address < end; address += 0x1000) {
+         // Get the current read and write pointers; there are TCM and non-TCM maps
+-        uint8_t *&read = (tcm ? readMap9A : readMap9B)[address >> 12];
+-        uint8_t *&write = (tcm ? writeMap9A : writeMap9B)[address >> 12];
++        const uint32_t index = static_cast<uint32_t>(address >> 12);
++        uint8_t **readMap = tcm ? readMap9A : readMap9B;
++        uint8_t **writeMap = tcm ? writeMap9A : writeMap9B;
++        uint8_t *&read = readMap[index];
++        uint8_t *&write = writeMap[index];
+         read = write = nullptr;
+
+         // Map a 4KB block to the corresponding ARM9 memory, excluding special cases
+@@ -310,8 +313,9 @@ void Memory::updateMap7(uint32_t start, uint32_t end) {
+     // Update the ARM7 read and write memory maps in the given range
+     for (uint64_t address = start; address < end; address += 0x1000) {
+         // Get the current read and write pointers
+-        uint8_t *&read = readMap7[address >> 12];
+-        uint8_t *&write = writeMap7[address >> 12];
++        const uint32_t index = static_cast<uint32_t>(address >> 12);
++        uint8_t *&read = readMap7[index];
++        uint8_t *&write = writeMap7[index];
+         read = write = nullptr;
+
+         if (core->gbaMode) { // GBA
+@@ -789,7 +793,7 @@ template <typename T> T Memory::readFallback(bool arm7, uint32_t address) {
+     if (data) {
+         T value = 0;
+         for (uint32_t i = 0; i < sizeof(T); i++)
+-            value |= data[i] << (i * 8);
++            value |= static_cast<T>(data[i]) << (i * 8);
+         return value;
      }
+
+@@ -2285,6 +2289,13 @@ void Memory::writeGbaHaltCnt(uint8_t value) {
+         LOG_CRIT("Unhandled request for stop mode\n");
+ }
+
++// Keep the byte fallback available to callers in other translation units.
++// Xenon GCC's -Ofast otherwise removes the only local instantiation while
++// NooDS' inline fast path still references it from the rest of the core.
++template void Memory::writeFallback<uint8_t>(bool arm7, uint32_t address, uint8_t value);
++template void Memory::writeFallback<uint16_t>(bool arm7, uint32_t address, uint16_t value);
++template void Memory::writeFallback<uint32_t>(bool arm7, uint32_t address, uint32_t value);
++
+ void Memory::writeMbk1(int i, uint8_t value) {
+     // Write to one of the NWRAM-A slot registers and update mappings
+     mbk1[i] = (value & 0x8D);
+diff --git a/src/core/memory/memory.h b/src/core/memory/memory.h
+index e215f59..c5fd672 100644
+--- a/src/core/memory/memory.h
++++ b/src/core/memory/memory.h
+@@ -159,11 +159,10 @@ template <typename T> FORCE_INLINE T Memory::read(bool arm7, uint32_t address, b
+     // Look up a pointer to readable memory and read a value from it LSB-first
+     uint8_t **readMap = arm7 ? readMap7 : (tcm ? readMap9A : readMap9B);
+     if (uint8_t *data = readMap[address >> 12]) {
+-        T value = 0;
+         data += address & (0x1000 - sizeof(T));
+-        for (uint32_t i = 0; i < sizeof(T); i++)
+-            value |= data[i] << (i * 8);
+-        return value;
++        if (sizeof(T) == 1) return data[0];
++        if (sizeof(T) == 2) return static_cast<T>(readLe16Aligned(data));
++        return static_cast<T>(readLe32Aligned(data));
+     }
+
+     // Handle special read cases that can't be mapped
+@@ -178,8 +177,12 @@ template <typename T> FORCE_INLINE void Memory::write(bool arm7, uint32_t addres
+     uint8_t **writeMap = arm7 ? writeMap7 : (tcm ? writeMap9A : writeMap9B);
+     if (uint8_t *data = writeMap[address >> 12]) {
+         data += address & (0x1000 - sizeof(T));
+-        for (uint32_t i = 0; i < sizeof(T); i++)
+-            data[i] = value >> (i * 8);
++        if (sizeof(T) == 1)
++            data[0] = static_cast<uint8_t>(value);
++        else if (sizeof(T) == 2)
++            writeLe16Aligned(data, static_cast<uint16_t>(value));
++        else
++            writeLe32Aligned(data, static_cast<uint32_t>(value));
+         return;
+     }
+
+diff --git a/src/core/memory/sd_mmc.cpp b/src/core/memory/sd_mmc.cpp
+index a8b062e..ce8bf38 100644
 --- a/src/core/memory/sd_mmc.cpp
 +++ b/src/core/memory/sd_mmc.cpp
 @@ -22,8 +22,8 @@
@@ -283,70 +818,3 @@
  }
 
  void SdMmc::saveState(FILE *file) {
---- a/src/core/arm/interpreter_alu.cpp
-+++ b/src/core/arm/interpreter_alu.cpp
-@@ -134,14 +134,14 @@
-     // When used as Rm, the program counter is read with +4
-     uint32_t value = *registers[opcode & 0xF] + (((opcode & 0xF) == 0xF) << 2);
-     uint8_t shift = *registers[(opcode >> 8) & 0xF];
--    return (value << (32 - (shift & 0x1F))) | (value >> ((shift & 0x1F)));
-+    return rotateRight32(value, shift);
- }
-
- FORCE_INLINE uint32_t Interpreter::imm(uint32_t opcode) { // #i
-     // Rotate 8-bit immediate right by a multiple of 2
-     uint32_t value = opcode & 0xFF;
-     uint8_t shift = (opcode >> 7) & 0x1E;
--    return (value << (32 - shift)) | (value >> shift);
-+    return rotateRight32(value, shift);
- }
-
- FORCE_INLINE uint32_t Interpreter::lliS(uint32_t opcode) { // Rm,LSL #i (S)
-@@ -213,7 +213,7 @@
-     uint32_t value = *registers[opcode & 0xF] + (((opcode & 0xF) == 0xF) << 2);
-     uint8_t shift = *registers[(opcode >> 8) & 0xF];
-     if (shift > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(value & BIT((shift - 1) & 0x1F)) << 29);
--    return (value << (32 - (shift & 0x1F))) | (value >> ((shift & 0x1F)));
-+    return rotateRight32(value, shift);
- }
-
- FORCE_INLINE uint32_t Interpreter::immS(uint32_t opcode) { // #i (S)
-@@ -221,7 +221,7 @@
-     uint32_t value = opcode & 0xFF;
-     uint8_t shift = (opcode >> 7) & 0x1E;
-     if (shift > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(value & BIT(shift - 1)) << 29);
--    return (value << (32 - shift)) | (value >> shift);
-+    return rotateRight32(value, shift);
- }
-
- FORCE_INLINE int Interpreter::_and(uint32_t opcode, uint32_t op2) { // AND Rd,Rn,op2
-@@ -1231,7 +1231,7 @@
-     uint32_t *op0 = registers[opcode & 0x7];
-     uint32_t op1 = *registers[opcode & 0x7];
-     uint8_t op2 = *registers[(opcode >> 3) & 0x7];
--    *op0 = (*op0 << (32 - (op2 & 0x1F))) | (*op0 >> (op2 & 0x1F));
-+    *op0 = rotateRight32(*op0, op2);
-     cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
-     if (op2 > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(op1 & BIT((op2 - 1) & 0x1F)) << 29);
-     return 1;
---- a/src/core/arm/interpreter_transfer.cpp
-+++ b/src/core/arm/interpreter_transfer.cpp
-@@ -1118,7 +1118,7 @@
-     // Rotate the immediate value
-     uint32_t value = opcode & 0xFF;
-     uint8_t shift = (opcode >> 7) & 0x1E;
--    uint32_t op1 = (value << (32 - shift)) | (value >> shift);
-+    uint32_t op1 = rotateRight32(value, shift);
-
-     // Write the first 8 bits of the status flags, only changing the CPU mode when not in user mode
-     if (opcode & BIT(16)) {
-@@ -1139,7 +1139,7 @@
-     if (!spsr) return 1;
-     uint32_t value = opcode & 0xFF;
-     uint8_t shift = (opcode >> 7) & 0x1E;
--    uint32_t op1 = (value << (32 - shift)) | (value >> shift);
-+    uint32_t op1 = rotateRight32(value, shift);
-
-     // Write the saved status flags in 8-bit blocks
-     for (int i = 0; i < 4; i++) {
- }
