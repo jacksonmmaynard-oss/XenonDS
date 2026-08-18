@@ -18,7 +18,7 @@ INCLUDES := source
 
 CFLAGS := -g -O2 -Wall $(MACHDEP) $(INCLUDE)
 ASFLAGS := $(MACHDEP) $(INCLUDE)
-LDFLAGS := -g $(MACHDEP) -Wl,--gc-sections -Wl,-Map,$(notdir $@).map
+LDFLAGS := -g $(MACHDEP) -Wl,--gc-sections -Wl,-Map,$(TARGET).elf.map
 LIBS := -lxenon -lm -lfat
 LIBDIRS :=
 

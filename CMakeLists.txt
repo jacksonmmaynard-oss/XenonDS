@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(XenonDS VERSION 0.6.1 LANGUAGES CXX)
+project(XenonDS VERSION 0.7.0 LANGUAGES CXX)
 
 option(XENONDS_BUILD_TESTS "Build XenonDS host tests" ON)
 option(XENONDS_BUILD_TOOLS "Build XenonDS host tools" ON)

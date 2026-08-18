@@ -1,0 +1,352 @@
+--- a/src/core/defines.h
++++ b/src/core/defines.h
+@@ -78,25 +78,55 @@
+     b = c; \
+ }
+
+-// Macros that read a value larger than 8 bits from an 8-bit array
++// Read and write little-endian values without violating alignment or aliasing
++// rules. The original pointer casts happened to work on the upstream targets,
++// but are undefined in C++ and are unsafe on Xenon's 64-bit PowerPC toolchain.
++// Constant-size memcpy calls inline to native loads/stores at optimization.
++FORCE_INLINE uint16_t readLe16(const void *data) {
++    uint16_t value;
++    __builtin_memcpy(&value, data, sizeof(value));
+ #ifdef ENDIAN_BIG
+-#define U8TO16(data, index) __builtin_bswap16(*(uint16_t*)&(data)[index])
+-#define U8TO32(data, index) __builtin_bswap32(*(uint32_t*)&(data)[index])
+-#define U8TO64(data, index) __builtin_bswap64(*(uint64_t*)&(data)[index])
+-#else
+-#define U8TO16(data, index) (*(uint16_t*)&(data)[index])
+-#define U8TO32(data, index) (*(uint32_t*)&(data)[index])
+-#define U8TO64(data, index) (*(uint64_t*)&(data)[index])
++    value = __builtin_bswap16(value);
+ #endif
++    return value;
++}
++
++FORCE_INLINE uint32_t readLe32(const void *data) {
++    uint32_t value;
++    __builtin_memcpy(&value, data, sizeof(value));
++#ifdef ENDIAN_BIG
++    value = __builtin_bswap32(value);
++#endif
++    return value;
++}
+
+-// Macro that stores a 32-bit value to an 8-bit array
++FORCE_INLINE uint64_t readLe64(const void *data) {
++    uint64_t value;
++    __builtin_memcpy(&value, data, sizeof(value));
+ #ifdef ENDIAN_BIG
+-#define U32TO8(data, index, value) (*(uint32_t*)&(data)[index] = __builtin_bswap32(value))
+-#else
+-#define U32TO8(data, index, value) (*(uint32_t*)&(data)[index] = (value))
++    value = __builtin_bswap64(value);
+ #endif
++    return value;
++}
++
++FORCE_INLINE void writeLe32(void *data, uint32_t value) {
++#ifdef ENDIAN_BIG
++    value = __builtin_bswap32(value);
++#endif
++    __builtin_memcpy(data, &value, sizeof(value));
++}
++
++#define U8TO16(data, index) readLe16(&(data)[index])
++#define U8TO32(data, index) readLe32(&(data)[index])
++#define U8TO64(data, index) readLe64(&(data)[index])
++#define U32TO8(data, index, value) writeLe32(&(data)[index], (value))
++
++FORCE_INLINE uint32_t rotateRight32(uint32_t value, unsigned int shift) {
++    shift &= 31u;
++    return shift ? ((value >> shift) | (value << (32u - shift))) : value;
++}
+
+ // Macros that perform bit rotations
+ #define ROL8(v, s) ((v << s) | (v >> (8 - s)))
+ #define ROL32(v, s) ((v << s) | (v >> (32 - s)))
+-#define ROR32(v, s) ((v >> s) | (v << (32 - s)))
++#define ROR32(v, s) rotateRight32((v), (s))
+--- a/src/core/memory/memory.h
++++ b/src/core/memory/memory.h
+@@ -162,7 +162,7 @@
+         T value = 0;
+         data += address & (0x1000 - sizeof(T));
+         for (uint32_t i = 0; i < sizeof(T); i++)
+-            value |= data[i] << (i * 8);
++            value |= static_cast<T>(data[i]) << (i * 8);
+         return value;
+     }
+
+--- a/src/core/memory/memory.cpp
++++ b/src/core/memory/memory.cpp
+@@ -59,7 +59,7 @@
+     T value = 0;
+     for (uint8_t m = 0; m < count; m++)
+         for (uint32_t i = 0; i < sizeof(T); i++)
+-            value |= mappings[m][address + i] << (i * 8);
++            value |= static_cast<T>(mappings[m][address + i]) << (i * 8);
+     return value;
+ }
+
+@@ -206,8 +206,11 @@
+     // Update the ARM9 read and write memory maps in the given range
+     for (uint64_t address = start; address < end; address += 0x1000) {
+         // Get the current read and write pointers; there are TCM and non-TCM maps
+-        uint8_t *&read = (tcm ? readMap9A : readMap9B)[address >> 12];
+-        uint8_t *&write = (tcm ? writeMap9A : writeMap9B)[address >> 12];
++        const uint32_t index = static_cast<uint32_t>(address >> 12);
++        uint8_t **readMap = tcm ? readMap9A : readMap9B;
++        uint8_t **writeMap = tcm ? writeMap9A : writeMap9B;
++        uint8_t *&read = readMap[index];
++        uint8_t *&write = writeMap[index];
+         read = write = nullptr;
+
+         // Map a 4KB block to the corresponding ARM9 memory, excluding special cases
+@@ -310,8 +313,9 @@
+     // Update the ARM7 read and write memory maps in the given range
+     for (uint64_t address = start; address < end; address += 0x1000) {
+         // Get the current read and write pointers
+-        uint8_t *&read = readMap7[address >> 12];
+-        uint8_t *&write = writeMap7[address >> 12];
++        const uint32_t index = static_cast<uint32_t>(address >> 12);
++        uint8_t *&read = readMap7[index];
++        uint8_t *&write = writeMap7[index];
+         read = write = nullptr;
+
+         if (core->gbaMode) { // GBA
+@@ -789,7 +793,7 @@
+     if (data) {
+         T value = 0;
+         for (uint32_t i = 0; i < sizeof(T); i++)
+-            value |= data[i] << (i * 8);
++            value |= static_cast<T>(data[i]) << (i * 8);
+         return value;
+     }
+
+@@ -2285,6 +2289,11 @@
+         LOG_CRIT("Unhandled request for stop mode\n");
+ }
+
++// Keep the byte fallback available to callers in other translation units.
++// Xenon GCC's -Ofast otherwise removes the only local instantiation while
++// NooDS' inline fast path still references it from the rest of the core.
++template void Memory::writeFallback<uint8_t>(bool arm7, uint32_t address, uint8_t value);
++
+ void Memory::writeMbk1(int i, uint8_t value) {
+     // Write to one of the NWRAM-A slot registers and update mappings
+     mbk1[i] = (value & 0x8D);
+--- a/src/core/memory/cartridge.cpp
++++ b/src/core/memory/cartridge.cpp
+@@ -18,6 +18,7 @@
+ */
+
+ #include <cstring>
++#include <climits>
+ #include "../core.h"
+
+ Cartridge::~Cartridge() {
+@@ -58,9 +59,11 @@
+     // Attempt to open a ROM file
+     romFile = (romFd == -1) ? fopen(romPath.c_str(), "rb") : fdopen(dup(romFd), "rb");
+     if (!romFile) return false;
+-    fseek(romFile, 0, SEEK_END);
+-    romSize = ftell(romFile);
+-    fseek(romFile, 0, SEEK_SET);
++    if (fseek(romFile, 0, SEEK_END) != 0) return false;
++    long fileSize = ftell(romFile);
++    if (fileSize <= 0 || fileSize > INT_MAX || fseek(romFile, 0, SEEK_SET) != 0)
++        return false;
++    romSize = static_cast<int>(fileSize);
+
+     // Attempt to load the ROM's save into memory
+     if (FILE *saveFile = (saveFd == -1) ? fopen(savePath.c_str(), "rb") : fdopen(dup(saveFd), "rb")) {
+@@ -80,11 +83,59 @@
+ }
+
+ void Cartridge::loadRomSection(size_t offset, size_t size) {
+-    // Load a section of the current ROM file into memory
+-    if (rom) delete[] rom;
+-    rom = new uint8_t[size];
+-    fseek(romFile, offset, SEEK_SET);
+-    fread(rom, sizeof(uint8_t), size, romFile);
++    // Validate every request before touching the current buffer. A failed or
++    // short FAT read must never leave uninitialized bytes for the emulated CPUs
++    // to execute.
++    if (!romFile || size == 0 || offset > static_cast<size_t>(romSize) ||
++        size > static_cast<size_t>(romSize) - offset || offset > LONG_MAX)
++        throw ERROR_ROM;
++
++    uint8_t *next = new uint8_t[size];
++    if (fseek(romFile, static_cast<long>(offset), SEEK_SET) != 0) {
++        delete[] next;
++        throw ERROR_ROM;
++    }
++
++    const size_t chunkSize = 1024 * 1024;
++    size_t total = 0;
++#ifdef NOODS_XENON
++    const bool showProgress = (offset == 0 && size >= 16 * chunkSize);
++    unsigned int nextPercent = 10;
++    if (showProgress) {
++        printf("ROM preload: 0%%");
++        fflush(stdout);
++    }
++#endif
++
++    while (total < size) {
++        size_t request = size - total;
++        if (request > chunkSize) request = chunkSize;
++        const size_t count = fread(next + total, sizeof(uint8_t), request, romFile);
++        if (count == 0) break;
++        total += count;
++
++#ifdef NOODS_XENON
++        if (showProgress) {
++            const unsigned int percent = static_cast<unsigned int>((total * 100) / size);
++            if (percent >= nextPercent) {
++                printf("...%u%%", percent);
++                fflush(stdout);
++                nextPercent += 10;
++            }
++        }
++#endif
++    }
++
++#ifdef NOODS_XENON
++    if (showProgress) printf("\n");
++#endif
++    if (total != size) {
++        delete[] next;
++        throw ERROR_ROM;
++    }
++
++    delete[] rom;
++    rom = next;
+     if (!core->dsiMode) core->dldi.patchRom(rom, offset, size);
+ }
+
+--- a/src/core/arm/interpreter.h
++++ b/src/core/arm/interpreter.h
+@@ -30,6 +30,8 @@
+     HleBios *bios = nullptr;
+     uint32_t entryAddr = 0;
+     uint8_t halted = 0;
++    uint32_t unknownOpcodeCount = 0;
++    uint32_t lastUnknownOpcode = 0;
+
+     Interpreter(Core *core, bool arm7);
+     void saveState(FILE *file);
+--- a/src/core/arm/interpreter.cpp
++++ b/src/core/arm/interpreter.cpp
+@@ -446,12 +446,16 @@
+
+ int Interpreter::unkArm(uint32_t opcode) {
+     // Handle an unknown ARM opcode
++    unknownOpcodeCount++;
++    lastUnknownOpcode = opcode;
+     LOG_CRIT("Unknown ARM%d ARM opcode: 0x%X\n", arm7 ? 7 : 9, opcode);
+     return 1;
+ }
+
+ int Interpreter::unkThumb(uint16_t opcode) {
+     // Handle an unknown THUMB opcode
++    unknownOpcodeCount++;
++    lastUnknownOpcode = opcode;
+     LOG_CRIT("Unknown ARM%d THUMB opcode: 0x%X\n", arm7 ? 7 : 9, opcode);
+     return 1;
+ }
+--- a/src/core/io/aes.cpp
++++ b/src/core/io/aes.cpp
+@@ -38,7 +38,8 @@
+     // Generate the AES forward and reverse tables
+     for (int i = 0; i < 0x100; i++) {
+         uint8_t x = (fsBox[i] << 1) ^ ((fsBox[i] & 0x80) ? 0x11B : 0);
+-        fTable[i] = (fsBox[i] * 0x10101) ^ (x * 0x1000001);
++        fTable[i] = (static_cast<uint32_t>(fsBox[i]) * 0x10101u) ^
++            (static_cast<uint32_t>(x) * 0x1000001u);
+         rTable[i] = (x = rsBox[i]) ? (pow[(log[x] + log[0xE]) % 0xFF] << 24) | (pow[(log[x] + log[0x9]) % 0xFF] << 16) |
+             (pow[(log[x] + log[0xD]) % 0xFF] << 8) | pow[(log[x] + log[0xB]) % 0xFF] : 0;
+     }
+--- a/src/core/memory/sd_mmc.cpp
++++ b/src/core/memory/sd_mmc.cpp
+@@ -22,8 +22,8 @@
+
+ SdMmc::~SdMmc() {
+     // Close the NAND and SD files
+-    fclose(nand);
+-    fclose(sd);
++    if (nand) fclose(nand);
++    if (sd) fclose(sd);
+ }
+
+ void SdMmc::saveState(FILE *file) {
+--- a/src/core/arm/interpreter_alu.cpp
++++ b/src/core/arm/interpreter_alu.cpp
+@@ -134,14 +134,14 @@
+     // When used as Rm, the program counter is read with +4
+     uint32_t value = *registers[opcode & 0xF] + (((opcode & 0xF) == 0xF) << 2);
+     uint8_t shift = *registers[(opcode >> 8) & 0xF];
+-    return (value << (32 - (shift & 0x1F))) | (value >> ((shift & 0x1F)));
++    return rotateRight32(value, shift);
+ }
+
+ FORCE_INLINE uint32_t Interpreter::imm(uint32_t opcode) { // #i
+     // Rotate 8-bit immediate right by a multiple of 2
+     uint32_t value = opcode & 0xFF;
+     uint8_t shift = (opcode >> 7) & 0x1E;
+-    return (value << (32 - shift)) | (value >> shift);
++    return rotateRight32(value, shift);
+ }
+
+ FORCE_INLINE uint32_t Interpreter::lliS(uint32_t opcode) { // Rm,LSL #i (S)
+@@ -213,7 +213,7 @@
+     uint32_t value = *registers[opcode & 0xF] + (((opcode & 0xF) == 0xF) << 2);
+     uint8_t shift = *registers[(opcode >> 8) & 0xF];
+     if (shift > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(value & BIT((shift - 1) & 0x1F)) << 29);
+-    return (value << (32 - (shift & 0x1F))) | (value >> ((shift & 0x1F)));
++    return rotateRight32(value, shift);
+ }
+
+ FORCE_INLINE uint32_t Interpreter::immS(uint32_t opcode) { // #i (S)
+@@ -221,7 +221,7 @@
+     uint32_t value = opcode & 0xFF;
+     uint8_t shift = (opcode >> 7) & 0x1E;
+     if (shift > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(value & BIT(shift - 1)) << 29);
+-    return (value << (32 - shift)) | (value >> shift);
++    return rotateRight32(value, shift);
+ }
+
+ FORCE_INLINE int Interpreter::_and(uint32_t opcode, uint32_t op2) { // AND Rd,Rn,op2
+@@ -1231,7 +1231,7 @@
+     uint32_t *op0 = registers[opcode & 0x7];
+     uint32_t op1 = *registers[opcode & 0x7];
+     uint8_t op2 = *registers[(opcode >> 3) & 0x7];
+-    *op0 = (*op0 << (32 - (op2 & 0x1F))) | (*op0 >> (op2 & 0x1F));
++    *op0 = rotateRight32(*op0, op2);
+     cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
+     if (op2 > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(op1 & BIT((op2 - 1) & 0x1F)) << 29);
+     return 1;
+--- a/src/core/arm/interpreter_transfer.cpp
++++ b/src/core/arm/interpreter_transfer.cpp
+@@ -1118,7 +1118,7 @@
+     // Rotate the immediate value
+     uint32_t value = opcode & 0xFF;
+     uint8_t shift = (opcode >> 7) & 0x1E;
+-    uint32_t op1 = (value << (32 - shift)) | (value >> shift);
++    uint32_t op1 = rotateRight32(value, shift);
+
+     // Write the first 8 bits of the status flags, only changing the CPU mode when not in user mode
+     if (opcode & BIT(16)) {
+@@ -1139,7 +1139,7 @@
+     if (!spsr) return 1;
+     uint32_t value = opcode & 0xFF;
+     uint8_t shift = (opcode >> 7) & 0x1E;
+-    uint32_t op1 = (value << (32 - shift)) | (value >> shift);
++    uint32_t op1 = rotateRight32(value, shift);
+
+     // Write the saved status flags in 8-bit blocks
+     for (int i = 0; i < 4; i++) {
+ }

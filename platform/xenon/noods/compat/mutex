@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+
+// LibXenon's GCC ships the C++11 headers, but its libstdc++ was configured
+// without gthreads. NooDS still needs these types to exist when its optional
+// worker threads and audio frontend are disabled. The emulation loop itself is
+// single-owner, so these locks intentionally compile to no-ops for bring-up.
+namespace std {
+
+class mutex {
+public:
+    void lock() {}
+    bool try_lock() { return true; }
+    void unlock() {}
+};
+
+template <typename Mutex>
+class lock_guard {
+public:
+    explicit lock_guard(Mutex& mutex) : mutex_(mutex) { mutex_.lock(); }
+    ~lock_guard() { mutex_.unlock(); }
+
+private:
+    lock_guard(const lock_guard&);
+    lock_guard& operator=(const lock_guard&);
+    Mutex& mutex_;
+};
+
+template <typename Mutex>
+class unique_lock {
+public:
+    explicit unique_lock(Mutex& mutex) : mutex_(&mutex), owns_(true) {
+        mutex_->lock();
+    }
+    ~unique_lock() {
+        if (owns_) mutex_->unlock();
+    }
+    void lock() {
+        if (!owns_) mutex_->lock(), owns_ = true;
+    }
+    void unlock() {
+        if (owns_) mutex_->unlock(), owns_ = false;
+    }
+    bool owns_lock() const { return owns_; }
+    Mutex* mutex() const { return mutex_; }
+
+private:
+    unique_lock(const unique_lock&);
+    unique_lock& operator=(const unique_lock&);
+    Mutex* mutex_;
+    bool owns_;
+};
+
+} // namespace std

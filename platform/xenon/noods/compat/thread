@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+
+// NooDS only constructs these when threaded2D/threaded3D are non-zero. The
+// first Xbox backend runs those paths synchronously and uses a dedicated
+// LibXenon hardware thread solely for video presentation.
+namespace std {
+
+class thread {
+public:
+    thread() {}
+
+    template <typename Function, typename... Args>
+    explicit thread(Function, Args...) {}
+
+    bool joinable() const { return false; }
+    void join() {}
+    void detach() {}
+};
+
+namespace this_thread {
+inline void yield() {}
+}
+
+} // namespace std

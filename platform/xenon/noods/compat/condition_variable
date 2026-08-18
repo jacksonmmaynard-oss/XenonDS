@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+
+#include <chrono>
+#include <mutex>
+
+namespace std {
+
+class condition_variable {
+public:
+    void notify_one() {}
+    void notify_all() {}
+
+    template <typename Lock, typename Rep, typename Period, typename Predicate>
+    bool wait_for(Lock&, const chrono::duration<Rep, Period>&, Predicate predicate) {
+        return predicate();
+    }
+};
+
+} // namespace std
