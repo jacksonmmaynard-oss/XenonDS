@@ -32,7 +32,8 @@
 - [x] Reproducible core smoke tests and GitHub release artifacts
 - [ ] LibXenon audio ring buffer
 - [ ] ROM browser and clean error screen
-- [ ] Configurable screen layouts and frame skip
+- [x] Configurable picture correction and hybrid 2D/3D frame skip
+- [ ] Configurable screen layouts
 - [ ] Hardware compatibility testing beyond the initial target ROM
 - [x] Performance counters for input, ARM execution, frame copy, and Xbox video
 
@@ -41,7 +42,7 @@
 - [ ] PowerPC code emitter and executable-code cache
 - [ ] ARM and Thumb basic-block translation
 - [ ] Interpreter fallback for unsupported operations
-- [x] Multi-thread software 3D across the four non-main Xenon hardware contexts
+- [x] Multi-thread software 3D on contexts 2/3/4 with context 5 reserved for video
 - [ ] Stable 59.826 FPS, synchronized audio and saving
 
 ## Milestone 4: public alpha

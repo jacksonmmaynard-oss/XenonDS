@@ -1,7 +1,7 @@
-XenonDS v0.8.1 - NooDS color and pacing preview
+XenonDS v0.9.1 - validated Turbo build
 
-Copy this package's contents to the root of a FAT32 USB drive, preserving the
-folders:
+Copy this package's contents to the root of a FAT32 USB drive, preserving this
+layout:
 
   xenon.elf
   XenonDS/xenonds-core.elf32
@@ -11,16 +11,14 @@ Add exactly one legally dumped Nintendo DS image:
   XenonDS/game.nds
 
 Boot XeLL and press A at the loader prompt. XenonDS boots the game directly;
-Nintendo DS BIOS and firmware files are not required for this mode. A save is
-stored beside the ROM as XenonDS/game.sav. The emulator flushes changed save
-data periodically and again when you exit with the Guide button.
+Nintendo DS BIOS and firmware files are not required. A save is stored beside
+the ROM as XenonDS/game.sav and is flushed periodically and when Guide exits.
 
-Large ROMs show a `ROM preload` line. Wait for it to reach 100%, followed by
-`Core ready. Running game...`. The two DS screens then replace the text console.
-The upper-left overlay reports EMU (emulated DS frames per second) and VID
-(frames displayed per second). Both read 00.0 during initial sampling. The
-default performance mode renders every other frame while continuing to execute
-the DS CPU and game clock every frame.
+Large ROMs show ROM-preload progress. Wait for 100%, then for
+`Core ready. Running game...`. EMU is the completed emulated-frame rate; VID is
+the rate of frames sent to the television. SPEED is real DS game-clock speed:
+100% is full speed, while 33% means the game is advancing at about one third of
+normal speed. The counters begin at zero while collecting their first sample.
 
 Controls:
 
@@ -30,16 +28,35 @@ Controls:
   Menu/View          DS Start/Select
   Right stick        Move the touchscreen cursor
   Right trigger      Touch the touchscreen
+  Left trigger       Toggle Turbo rendering mode (yellow TURBO indicator)
+  Right-stick click  Open / close display settings
   Guide              Save and exit
 
-This NooDS build uses native-resolution software rendering and has no
-audio, ROM browser, save states, microphone, or network emulation UI yet.
+Display settings:
 
-If XenonDS stops at a diagnostic screen, photograph the complete ARM9/ARM7
-message and keep the matching v0.8.1 symbols artifact. The build is considered
-verified only after animated graphics, controller input, and `game.sav` have
-all been tested on the console.
+  D-pad up/down      Select Brightness, Contrast, or Color
+  D-pad left/right   Change the selected value immediately
+  A                  Restore the defaults
+  B                  Save settings and close
 
-Do not publish ROMs, console keys, BIOS/firmware dumps, or NAND files.
-XenonDS' NooDS executable is distributed under GPL-3.0-or-later. Corresponding
+Settings are stored beside the ROM as XenonDS/xenonds-display.cfg. Normal mode
+renders every completed DS frame and applies the normal 60 Hz cap. Turbo removes
+that cap and sends one complete rendered frame in four to the television while
+still executing DS CPU, input, timers, and game logic continuously. Turbo does
+not promise a fixed 2x multiplier; its SPEED counter shows the real result.
+Guest display captures still receive fresh internal 2D/3D pixels when required,
+preserving capture-based videos and effects.
+
+The v0.9.1 frontend owns pacing, statistics, and save timing at exact NooDS
+end-of-frame boundaries. Internal CPU halt/resume scheduler returns are never
+counted or delayed as frames. This fixes the v0.8.4-v0.8.5 failure that could
+leave both DS screens white with the overlay frozen at 0 FPS. If completed DS
+frames continue without a video handoff, the build stops with a diagnostic
+instead of hanging indefinitely. Frame submission is nonblocking, presentation
+owns hardware context 5 exclusively, and ordinary video-worker waits are
+bounded so the frontend cannot silently deadlock during normal presentation.
+
+This preview has no audio, ROM browser, save states, microphone input, or
+network-emulation UI. Do not publish ROMs, console keys, BIOS/firmware dumps,
+or NAND files. XenonDS' NooDS executable is GPL-3.0-or-later; corresponding
 source and build scripts are in the XenonDS repository.

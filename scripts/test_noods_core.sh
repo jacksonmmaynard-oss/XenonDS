@@ -25,6 +25,10 @@ mapfile -t sources < <(
     "$repo_root/tests/noods_core_smoke.cpp" "${sources[@]}" -o "$binary"
 
 "$binary" "$rom_path"
+"$binary" "$rom_path" --framepath-regression
+"$binary" "$rom_path" --capture-regression
+"$binary" "$rom_path" --capture-bank-matrix
+"$binary" "$rom_path" --cadence-stress "${NOODS_CADENCE_STRESS_FRAMES:-2000}"
 "$binary" "$rom_path" --benchmark "${NOODS_BENCHMARK_FRAMES:-600}"
 "$binary" "$rom_path" --renderer-benchmark "${NOODS_RENDERER_BENCHMARK_FRAMES:-120}"
 

@@ -1,11 +1,11 @@
 diff --git a/src/core/arm/interpreter.cpp b/src/core/arm/interpreter.cpp
-index 9831699..32e4570 100644
+index 9831699..5de6968 100644
 --- a/src/core/arm/interpreter.cpp
 +++ b/src/core/arm/interpreter.cpp
 @@ -19,6 +19,45 @@
-
+ 
  #include "../core.h"
-
+ 
 +namespace {
 +
 +FORCE_INLINE bool continueCore(Core &core) {
@@ -35,7 +35,7 @@ index 9831699..32e4570 100644
 +        // O(1). Pop before invoking it because callbacks may schedule events.
 +        const SchedTask task = core.events.back().task;
 +        core.events.pop_back();
-+        core.tasks[task]();
++        core.runTask(task);
 +#else
 +        core.tasks[core.events.front().task]();
 +        core.events.erase(core.events.begin());
@@ -49,7 +49,7 @@ index 9831699..32e4570 100644
      // Initialize the registers for user mode
      for (int i = 0; i < 32; i++)
 @@ -108,13 +147,9 @@ void Interpreter::resetCycles() {
-
+ 
  void Interpreter::runCoreNone(Core &core) {
      // Run the core with no active CPUs
 -    while (core.running.exchange(true)) {
@@ -63,7 +63,7 @@ index 9831699..32e4570 100644
 +        runScheduledEvents(core);
      }
  }
-
+ 
 @@ -124,18 +159,14 @@ template void Interpreter::runCoreSingle<true, 1>(Core &core);
  template <bool _arm7, int shift> void Interpreter::runCoreSingle(Core &core) {
      // Run the core with one active CPU
@@ -75,7 +75,7 @@ index 9831699..32e4570 100644
 -        while (core.events[0].cycles > arm.cycles)
 +        while (nextEventCycles(core) > arm.cycles)
              arm.cycles = (core.globalCycles += arm.runOpcode() << shift);
-
+ 
          // Jump to the next task and run all that are scheduled now
 -        core.globalCycles = core.events[0].cycles;
 -        while (core.events[0].cycles <= core.globalCycles) {
@@ -85,7 +85,7 @@ index 9831699..32e4570 100644
 +        runScheduledEvents(core);
      }
  }
-
+ 
 @@ -143,9 +174,9 @@ void Interpreter::runCoreNds(Core &core) {
      // Run the core with both CPUs active in NDS mode
      Interpreter &arm9 = core.interpreter[0];
@@ -100,7 +100,7 @@ index 9831699..32e4570 100644
              if (core.globalCycles >= arm7.cycles)
 @@ -154,11 +185,7 @@ void Interpreter::runCoreNds(Core &core) {
          }
-
+ 
          // Jump to the next task and run all that are scheduled now
 -        core.globalCycles = core.events[0].cycles;
 -        while (core.events[0].cycles <= core.globalCycles) {
@@ -110,7 +110,7 @@ index 9831699..32e4570 100644
 +        runScheduledEvents(core);
      }
  }
-
+ 
 @@ -166,9 +193,9 @@ void Interpreter::runCoreDsi(Core &core) {
      // Run the core in DSi mode
      Interpreter &arm9 = core.interpreter[0];
@@ -125,7 +125,7 @@ index 9831699..32e4570 100644
                  int cycles = arm9.runOpcode() + arm9.dsiCycle;
 @@ -183,11 +210,7 @@ void Interpreter::runCoreDsi(Core &core) {
          }
-
+ 
          // Jump to the next task and run all that are scheduled now
 -        core.globalCycles = core.events[0].cycles;
 -        while (core.events[0].cycles <= core.globalCycles) {
@@ -135,15 +135,15 @@ index 9831699..32e4570 100644
 +        runScheduledEvents(core);
      }
  }
-
-@@ -199,21 +222,147 @@ FORCE_INLINE int Interpreter::runOpcode() {
+ 
+@@ -199,38 +222,164 @@ FORCE_INLINE int Interpreter::runOpcode() {
      // Execute an instruction
      if (cpsr & BIT(5)) { // THUMB mode
          // Increment the program counter and fill the pipeline from pointer or fallback
 -        pipeline[1] = (((*registers[15] += 2) & 0xFFE) && pcData) ? U8TO16(pcData += 2, 0) : getOpcode16();
 -
 -        // Execute a THUMB instruction
-+        pipeline[1] = (((*registers[15] += 2) & 0xFFE) && pcData) ?
++        pipeline[1] = (((registersUsr[15] += 2) & 0xFFE) && pcData) ?
 +            readLe16Aligned(pcData += 2) : getOpcode16();
 +
 +        // Execute a THUMB instruction through a branch-friendly decoder. The
@@ -158,9 +158,9 @@ index 9831699..32e4570 100644
      else { // ARM mode
          // Increment the program counter and fill the pipeline from pointer or fallback
 -        pipeline[1] = (((*registers[15] += 4) & 0xFFC) && pcData) ? U8TO32(pcData += 4, 0) : getOpcode32();
-+        pipeline[1] = (((*registers[15] += 4) & 0xFFC) && pcData) ?
++        pipeline[1] = (((registersUsr[15] += 4) & 0xFFC) && pcData) ?
 +            readLe32Aligned(pcData += 4) : getOpcode32();
-
+ 
          // Execute an ARM instruction based on its condition
          switch (condition[((opcode >> 24) & 0xF0) | (cpsr >> 28)]) {
              case 0: return 1; // False
@@ -288,27 +288,87 @@ index 9831699..32e4570 100644
 +    default: return (this->*thumbInstrs[index])(opcode);
      }
  }
-
-@@ -222,7 +371,7 @@ uint16_t Interpreter::getOpcode16() {
-     if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[*registers[15] >> 12]))
-         return core->memory.read<uint16_t>(arm7, *registers[15]);
-     pcData += (*registers[15] & 0xFFE);
+ 
+ uint16_t Interpreter::getOpcode16() {
+     // Set the opcode pointer or fall back to a regular 16-bit opcode read
+-    if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[*registers[15] >> 12]))
+-        return core->memory.read<uint16_t>(arm7, *registers[15]);
+-    pcData += (*registers[15] & 0xFFE);
 -    return U8TO16(pcData, 0);
++    if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[registersUsr[15] >> 12]))
++        return core->memory.read<uint16_t>(arm7, registersUsr[15]);
++    pcData += (registersUsr[15] & 0xFFE);
 +    return readLe16Aligned(pcData);
  }
-
+ 
  uint32_t Interpreter::getOpcode32() {
-@@ -230,7 +379,7 @@ uint32_t Interpreter::getOpcode32() {
-     if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[*registers[15] >> 12]))
-         return core->memory.read<uint32_t>(arm7, *registers[15]);
-     pcData += (*registers[15] & 0xFFC);
+     // Set the opcode pointer or fall back to a regular 32-bit opcode read
+-    if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[*registers[15] >> 12]))
+-        return core->memory.read<uint32_t>(arm7, *registers[15]);
+-    pcData += (*registers[15] & 0xFFC);
 -    return U8TO32(pcData, 0);
++    if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[registersUsr[15] >> 12]))
++        return core->memory.read<uint32_t>(arm7, registersUsr[15]);
++    pcData += (registersUsr[15] & 0xFFC);
 +    return readLe32Aligned(pcData);
  }
-
+ 
  void Interpreter::halt(int bit) {
+@@ -281,8 +430,8 @@ int Interpreter::exception(uint8_t vector) {
+     // Switch the CPU mode, save the return address, and jump to the exception vector
+     static const uint8_t modes[] = { 0x13, 0x1B, 0x13, 0x17, 0x17, 0x13, 0x12, 0x11 };
+     setCpsr((cpsr & ~0x3F) | BIT(7) | modes[vector >> 2], true); // ARM, interrupts off, new mode
+-    *registers[14] = *registers[15] + ((*spsr & BIT(5)) >> 4);
+-    *registers[15] = (arm7 ? 0 : core->cp15.exceptionAddr) + vector;
++    *registers[14] = registersUsr[15] + ((*spsr & BIT(5)) >> 4);
++    registersUsr[15] = (arm7 ? 0 : core->cp15.exceptionAddr) + vector;
+     flushPipeline();
+     return 3;
+ }
+@@ -290,13 +439,13 @@ int Interpreter::exception(uint8_t vector) {
+ void Interpreter::flushPipeline() {
+     // Adjust the program counter and refill the pipeline after a jump
+     if (cpsr & BIT(5)) { // THUMB mode
+-        *registers[15] = (*registers[15] & ~0x1) + 2;
+-        pipeline[0] = core->memory.read<uint16_t>(arm7, *registers[15] - 2);
++        registersUsr[15] = (registersUsr[15] & ~0x1) + 2;
++        pipeline[0] = core->memory.read<uint16_t>(arm7, registersUsr[15] - 2);
+         pipeline[1] = getOpcode16();
+     }
+     else { // ARM mode
+-        *registers[15] = (*registers[15] & ~0x3) + 4;
+-        pipeline[0] = core->memory.read<uint32_t>(arm7, *registers[15] - 4);
++        registersUsr[15] = (registersUsr[15] & ~0x3) + 4;
++        pipeline[0] = core->memory.read<uint32_t>(arm7, registersUsr[15] - 4);
+         pipeline[1] = getOpcode32();
+     }
+ }
+@@ -421,12 +570,12 @@ int Interpreter::handleReserved(uint32_t opcode) {
+ int Interpreter::handleHleIrq() {
+     // Switch to IRQ mode, save the return address, and push registers to the stack
+     setCpsr((cpsr & ~0x3F) | BIT(7) | 0x12, true);
+-    *registers[14] = *registers[15] + ((*spsr & BIT(5)) ? 2 : 0);
++    *registers[14] = registersUsr[15] + ((*spsr & BIT(5)) ? 2 : 0);
+     stmdbW((13 << 16) | BIT(0) | BIT(1) | BIT(2) | BIT(3) | BIT(12) | BIT(14));
+ 
+     // Set the return address to the special HLE BIOS opcode amd jump to the interrupt handler
+     *registers[14] = arm7 ? 0x00000000 : 0xFFFF0000;
+-    *registers[15] = core->memory.read<uint32_t>(arm7, arm7 ? 0x3FFFFFC : (core->cp15.dtcmAddr + 0x3FFC));
++    registersUsr[15] = core->memory.read<uint32_t>(arm7, arm7 ? 0x3FFFFFC : (core->cp15.dtcmAddr + 0x3FFC));
+     flushPipeline();
+     return 3;
+ }
+@@ -438,7 +587,7 @@ int Interpreter::finishHleIrq() {
+ 
+     // Pop registers from the stack, jump to the return address, and restore the mode
+     ldmiaW((13 << 16) | BIT(0) | BIT(1) | BIT(2) | BIT(3) | BIT(12) | BIT(14));
+-    *registers[15] = *registers[14] - 4;
++    registersUsr[15] = *registers[14] - 4;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
 @@ -446,12 +595,16 @@ int Interpreter::finishHleIrq() {
-
+ 
  int Interpreter::unkArm(uint32_t opcode) {
      // Handle an unknown ARM opcode
 +    unknownOpcodeCount++;
@@ -316,7 +376,7 @@ index 9831699..32e4570 100644
      LOG_CRIT("Unknown ARM%d ARM opcode: 0x%X\n", arm7 ? 7 : 9, opcode);
      return 1;
  }
-
+ 
  int Interpreter::unkThumb(uint16_t opcode) {
      // Handle an unknown THUMB opcode
 +    unknownOpcodeCount++;
@@ -325,7 +385,7 @@ index 9831699..32e4570 100644
      return 1;
  }
 diff --git a/src/core/arm/interpreter.h b/src/core/arm/interpreter.h
-index 08d0da2..9d3b49f 100644
+index 08d0da2..727ca08 100644
 --- a/src/core/arm/interpreter.h
 +++ b/src/core/arm/interpreter.h
 @@ -30,6 +30,8 @@ public:
@@ -334,19 +394,28 @@ index 08d0da2..9d3b49f 100644
      uint8_t halted = 0;
 +    uint32_t unknownOpcodeCount = 0;
 +    uint32_t lastUnknownOpcode = 0;
-
+ 
      Interpreter(Core *core, bool arm7);
      void saveState(FILE *file);
+@@ -53,7 +55,7 @@ public:
+     void interrupt();
+ 
+     bool isThumb() { return cpsr & BIT(5); }
+-    uint32_t getPC() { return *registers[15]; }
++    uint32_t getPC() { return registersUsr[15]; }
+     int handleHleIrq();
+ 
+     uint8_t readIme() { return ime; }
 @@ -98,6 +100,7 @@ private:
      static const uint8_t bitCount[0x100];
-
+ 
      int runOpcode();
 +    int runThumbOpcode(uint16_t opcode);
      int exception(uint8_t vector);
      void flushPipeline();
      void swapRegisters(uint32_t value);
 diff --git a/src/core/arm/interpreter_alu.cpp b/src/core/arm/interpreter_alu.cpp
-index 605f914..92ec2d4 100644
+index 605f914..ec16ab3 100644
 --- a/src/core/arm/interpreter_alu.cpp
 +++ b/src/core/arm/interpreter_alu.cpp
 @@ -134,14 +134,14 @@ FORCE_INLINE uint32_t Interpreter::rrr(uint32_t opcode) { // Rm,ROR Rs
@@ -356,7 +425,7 @@ index 605f914..92ec2d4 100644
 -    return (value << (32 - (shift & 0x1F))) | (value >> ((shift & 0x1F)));
 +    return rotateRight32(value, shift);
  }
-
+ 
  FORCE_INLINE uint32_t Interpreter::imm(uint32_t opcode) { // #i
      // Rotate 8-bit immediate right by a multiple of 2
      uint32_t value = opcode & 0xFF;
@@ -364,7 +433,7 @@ index 605f914..92ec2d4 100644
 -    return (value << (32 - shift)) | (value >> shift);
 +    return rotateRight32(value, shift);
  }
-
+ 
  FORCE_INLINE uint32_t Interpreter::lliS(uint32_t opcode) { // Rm,LSL #i (S)
 @@ -213,7 +213,7 @@ FORCE_INLINE uint32_t Interpreter::rrrS(uint32_t opcode) { // Rm,ROR Rs (S)
      uint32_t value = *registers[opcode & 0xF] + (((opcode & 0xF) == 0xF) << 2);
@@ -373,7 +442,7 @@ index 605f914..92ec2d4 100644
 -    return (value << (32 - (shift & 0x1F))) | (value >> ((shift & 0x1F)));
 +    return rotateRight32(value, shift);
  }
-
+ 
  FORCE_INLINE uint32_t Interpreter::immS(uint32_t opcode) { // #i (S)
 @@ -221,7 +221,7 @@ FORCE_INLINE uint32_t Interpreter::immS(uint32_t opcode) { // #i (S)
      uint32_t value = opcode & 0xFF;
@@ -382,8 +451,251 @@ index 605f914..92ec2d4 100644
 -    return (value << (32 - shift)) | (value >> shift);
 +    return rotateRight32(value, shift);
  }
-
+ 
  FORCE_INLINE int Interpreter::_and(uint32_t opcode, uint32_t op2) { // AND Rd,Rn,op2
+@@ -232,7 +232,7 @@ FORCE_INLINE int Interpreter::_and(uint32_t opcode, uint32_t op2) { // AND Rd,Rn
+     *op0 = op1 & op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -245,7 +245,7 @@ FORCE_INLINE int Interpreter::eor(uint32_t opcode, uint32_t op2) { // EOR Rd,Rn,
+     *op0 = op1 ^ op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -258,7 +258,7 @@ FORCE_INLINE int Interpreter::sub(uint32_t opcode, uint32_t op2) { // SUB Rd,Rn,
+     *op0 = op1 - op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -271,7 +271,7 @@ FORCE_INLINE int Interpreter::rsb(uint32_t opcode, uint32_t op2) { // RSB Rd,Rn,
+     *op0 = op2 - op1;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -284,7 +284,7 @@ FORCE_INLINE int Interpreter::add(uint32_t opcode, uint32_t op2) { // ADD Rd,Rn,
+     *op0 = op1 + op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -297,7 +297,7 @@ FORCE_INLINE int Interpreter::adc(uint32_t opcode, uint32_t op2) { // ADC Rd,Rn,
+     *op0 = op1 + op2 + ((cpsr & BIT(29)) >> 29);
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -310,7 +310,7 @@ FORCE_INLINE int Interpreter::sbc(uint32_t opcode, uint32_t op2) { // SBC Rd,Rn,
+     *op0 = op1 - op2 - 1 + ((cpsr & BIT(29)) >> 29);
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -323,7 +323,7 @@ FORCE_INLINE int Interpreter::rsc(uint32_t opcode, uint32_t op2) { // RSC Rd,Rn,
+     *op0 = op2 - op1 - 1 + ((cpsr & BIT(29)) >> 29);
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -374,7 +374,7 @@ FORCE_INLINE int Interpreter::orr(uint32_t opcode, uint32_t op2) { // ORR Rd,Rn,
+     *op0 = op1 | op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -385,7 +385,7 @@ FORCE_INLINE int Interpreter::mov(uint32_t opcode, uint32_t op2) { // MOV Rd,op2
+     *op0 = op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -398,7 +398,7 @@ FORCE_INLINE int Interpreter::bic(uint32_t opcode, uint32_t op2) { // BIC Rd,Rn,
+     *op0 = op1 & ~op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -409,7 +409,7 @@ FORCE_INLINE int Interpreter::mvn(uint32_t opcode, uint32_t op2) { // MVN Rd,op2
+     *op0 = ~op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -423,7 +423,7 @@ FORCE_INLINE int Interpreter::ands(uint32_t opcode, uint32_t op2) { // ANDS Rd,R
+     cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -438,7 +438,7 @@ FORCE_INLINE int Interpreter::eors(uint32_t opcode, uint32_t op2) { // EORS Rd,R
+     cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -454,7 +454,7 @@ FORCE_INLINE int Interpreter::subs(uint32_t opcode, uint32_t op2) { // SUBS Rd,R
+         ((op1 >= *op0) << 29) | (((op2 ^ op1) & ~(*op0 ^ op2) & BIT(31)) >> 3);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -470,7 +470,7 @@ FORCE_INLINE int Interpreter::rsbs(uint32_t opcode, uint32_t op2) { // RSBS Rd,R
+         ((op2 >= *op0) << 29) | (((op1 ^ op2) & ~(*op0 ^ op1) & BIT(31)) >> 3);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -486,7 +486,7 @@ FORCE_INLINE int Interpreter::adds(uint32_t opcode, uint32_t op2) { // ADDS Rd,R
+         ((op1 > *op0) << 29) | ((~(op2 ^ op1) & (*op0 ^ op2) & BIT(31)) >> 3);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -502,7 +502,7 @@ FORCE_INLINE int Interpreter::adcs(uint32_t opcode, uint32_t op2) { // ADCS Rd,R
+         (op2 == -1 && (cpsr & BIT(29)))) << 29) | ((~(op2 ^ op1) & (*op0 ^ op2) & BIT(31)) >> 3);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -518,7 +518,7 @@ FORCE_INLINE int Interpreter::sbcs(uint32_t opcode, uint32_t op2) { // SBCS Rd,R
+         (op2 != -1 || (cpsr & BIT(29)))) << 29) | (((op2 ^ op1) & ~(*op0 ^ op2) & BIT(31)) >> 3);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -534,7 +534,7 @@ FORCE_INLINE int Interpreter::rscs(uint32_t opcode, uint32_t op2) { // RSCS Rd,R
+         (op1 != -1 || (cpsr & BIT(29)))) << 29) | (((op1 ^ op2) & ~(*op0 ^ op1) & BIT(31)) >> 3);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -549,7 +549,7 @@ FORCE_INLINE int Interpreter::orrs(uint32_t opcode, uint32_t op2) { // ORRS Rd,R
+     cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -562,7 +562,7 @@ FORCE_INLINE int Interpreter::movs(uint32_t opcode, uint32_t op2) { // MOVS Rd,o
+     cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -577,7 +577,7 @@ FORCE_INLINE int Interpreter::bics(uint32_t opcode, uint32_t op2) { // BICS Rd,R
+     cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -590,7 +590,7 @@ FORCE_INLINE int Interpreter::mvns(uint32_t opcode, uint32_t op2) { // MVNS Rd,o
+     cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
+ 
+     // Handle pipelining and mode switching
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     if (spsr) setCpsr(*spsr);
+     flushPipeline();
+     return 3;
+@@ -1042,7 +1042,7 @@ int Interpreter::addHT(uint16_t opcode) { // ADD Rd,Rs
+     *op0 += op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -1064,7 +1064,7 @@ int Interpreter::movHT(uint16_t opcode) { // MOV Rd,Rs
+     *op0 = op2;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return 1;
++    if (op0 != &registersUsr[15]) return 1;
+     flushPipeline();
+     return 3;
+ }
+@@ -1072,7 +1072,7 @@ int Interpreter::movHT(uint16_t opcode) { // MOV Rd,Rs
+ int Interpreter::addPcT(uint16_t opcode) { // ADD Rd,PC,#i
+     // Program counter addition (THUMB)
+     uint32_t *op0 = registers[(opcode >> 8) & 0x7];
+-    uint32_t op1 = *registers[15] & ~3;
++    uint32_t op1 = registersUsr[15] & ~3;
+     uint32_t op2 = (opcode & 0xFF) << 2;
+     *op0 = op1 + op2;
+     return 1;
 @@ -1231,7 +1231,7 @@ int Interpreter::rorDpT(uint16_t opcode) { // ROR Rd,Rs
      uint32_t *op0 = registers[opcode & 0x7];
      uint32_t op1 = *registers[opcode & 0x7];
@@ -393,17 +705,553 @@ index 605f914..92ec2d4 100644
      cpsr = (cpsr & ~0xC0000000) | (*op0 & BIT(31)) | ((*op0 == 0) << 30);
      if (op2 > 0) cpsr = (cpsr & ~BIT(29)) | ((bool)(op1 & BIT((op2 - 1) & 0x1F)) << 29);
      return 1;
+diff --git a/src/core/arm/interpreter_branch.cpp b/src/core/arm/interpreter_branch.cpp
+index 891119a..4244b88 100644
+--- a/src/core/arm/interpreter_branch.cpp
++++ b/src/core/arm/interpreter_branch.cpp
+@@ -23,7 +23,7 @@ int Interpreter::bx(uint32_t opcode) { // BX Rn
+     // Branch to address and switch to THUMB if bit 0 is set
+     uint32_t op0 = *registers[opcode & 0xF];
+     cpsr |= (op0 & BIT(0)) << 5;
+-    *registers[15] = op0;
++    registersUsr[15] = op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -33,8 +33,8 @@ int Interpreter::blxReg(uint32_t opcode) { // BLX Rn
+     if (arm7) return 1; // ARM9 exclusive
+     uint32_t op0 = *registers[opcode & 0xF];
+     cpsr |= (op0 & BIT(0)) << 5;
+-    *registers[14] = *registers[15] - 4;
+-    *registers[15] = op0;
++    *registers[14] = registersUsr[15] - 4;
++    registersUsr[15] = op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -42,7 +42,7 @@ int Interpreter::blxReg(uint32_t opcode) { // BLX Rn
+ int Interpreter::b(uint32_t opcode) { // B label
+     // Branch to offset
+     int32_t op0 = (int32_t)(opcode << 8) >> 6;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -50,8 +50,8 @@ int Interpreter::b(uint32_t opcode) { // B label
+ int Interpreter::bl(uint32_t opcode) { // BL label
+     // Branch to offset with link
+     int32_t op0 = (int32_t)(opcode << 8) >> 6;
+-    *registers[14] = *registers[15] - 4;
+-    *registers[15] += op0;
++    *registers[14] = registersUsr[15] - 4;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -61,8 +61,8 @@ int Interpreter::blx(uint32_t opcode) { // BLX label
+     if (arm7) return 1; // ARM9 exclusive
+     int32_t op0 = ((int32_t)(opcode << 8) >> 6) | ((opcode & BIT(24)) >> 23);
+     cpsr |= BIT(5);
+-    *registers[14] = *registers[15] - 4;
+-    *registers[15] += op0;
++    *registers[14] = registersUsr[15] - 4;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -70,7 +70,7 @@ int Interpreter::blx(uint32_t opcode) { // BLX label
+ int Interpreter::swi(uint32_t opcode) { // SWI #i
+     // Software interrupt
+     LOG_INFO("Triggering ARM%d software interrupt: 0x%X\n", arm7 ? 7 : 9, opcode & 0xFFFFFF);
+-    *registers[15] -= 4;
++    registersUsr[15] -= 4;
+     return exception(0x08);
+ }
+ 
+@@ -78,7 +78,7 @@ int Interpreter::bxRegT(uint16_t opcode) { // BX Rs
+     // Branch to address and switch to ARM mode if bit 0 is cleared (THUMB)
+     uint32_t op0 = *registers[(opcode >> 3) & 0xF];
+     cpsr &= ~((~op0 & BIT(0)) << 5);
+-    *registers[15] = op0;
++    registersUsr[15] = op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -88,8 +88,8 @@ int Interpreter::blxRegT(uint16_t opcode) { // BLX Rs
+     if (arm7) return 1; // ARM9 exclusive
+     uint32_t op0 = *registers[(opcode >> 3) & 0xF];
+     cpsr &= ~((~op0 & BIT(0)) << 5);
+-    *registers[14] = *registers[15] - 1;
+-    *registers[15] = op0;
++    *registers[14] = registersUsr[15] - 1;
++    registersUsr[15] = op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -98,7 +98,7 @@ int Interpreter::beqT(uint16_t opcode) { // BEQ label
+     // Branch to offset if equal (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (~cpsr & BIT(30)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -107,7 +107,7 @@ int Interpreter::bneT(uint16_t opcode) { // BNE label
+     // Branch to offset if not equal (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (cpsr & BIT(30)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -116,7 +116,7 @@ int Interpreter::bcsT(uint16_t opcode) { // BCS label
+     // Branch to offset if carry set (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (~cpsr & BIT(29)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -125,7 +125,7 @@ int Interpreter::bccT(uint16_t opcode) { // BCC label
+     // Branch to offset if carry clear (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (cpsr & BIT(29)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -134,7 +134,7 @@ int Interpreter::bmiT(uint16_t opcode) { // BMI label
+     // Branch to offset if negative (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (~cpsr & BIT(31)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -143,7 +143,7 @@ int Interpreter::bplT(uint16_t opcode) { // BPL label
+     // Branch to offset if positive (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (cpsr & BIT(31)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -152,7 +152,7 @@ int Interpreter::bvsT(uint16_t opcode) { // BVS label
+     // Branch to offset if overflow set (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (~cpsr & BIT(28)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -161,7 +161,7 @@ int Interpreter::bvcT(uint16_t opcode) { // BVC label
+     // Branch to offset if overflow clear (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (cpsr & BIT(28)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -170,7 +170,7 @@ int Interpreter::bhiT(uint16_t opcode) { // BHI label
+     // Branch to offset if higher (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if ((cpsr & 0x60000000) != 0x20000000) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -179,7 +179,7 @@ int Interpreter::blsT(uint16_t opcode) { // BLS label
+     // Branch to offset if lower or same (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if ((cpsr & 0x60000000) == 0x20000000) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -188,7 +188,7 @@ int Interpreter::bgeT(uint16_t opcode) { // BGE label
+     // Branch to offset if signed greater or equal (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if ((cpsr ^ (cpsr << 3)) & BIT(31)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -197,7 +197,7 @@ int Interpreter::bltT(uint16_t opcode) { // BLT label
+     // Branch to offset if signed less than (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (~(cpsr ^ (cpsr << 3)) & BIT(31)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -206,7 +206,7 @@ int Interpreter::bgtT(uint16_t opcode) { // BGT label
+     // Branch to offset if signed greater than (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (((cpsr ^ (cpsr << 3)) | (cpsr << 1)) & BIT(31)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -215,7 +215,7 @@ int Interpreter::bleT(uint16_t opcode) { // BLE label
+     // Branch to offset if signed less or equal (THUMB)
+     int32_t op0 = (int8_t)opcode << 1;
+     if (~((cpsr ^ (cpsr << 3)) | (cpsr << 1)) & BIT(31)) return 1;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -223,7 +223,7 @@ int Interpreter::bleT(uint16_t opcode) { // BLE label
+ int Interpreter::bT(uint16_t opcode) { // B label
+     // Branch to offset (THUMB)
+     int32_t op0 = (int16_t)(opcode << 5) >> 4;
+-    *registers[15] += op0;
++    registersUsr[15] += op0;
+     flushPipeline();
+     return 3;
+ }
+@@ -231,15 +231,15 @@ int Interpreter::bT(uint16_t opcode) { // B label
+ int Interpreter::blSetupT(uint16_t opcode) { // BL/BLX label
+     // Set the upper 11 bits of the target address for a long BL/BLX (THUMB)
+     int32_t op0 = (int16_t)(opcode << 5) >> 4;
+-    *registers[14] = *registers[15] + (op0 << 11);
++    *registers[14] = registersUsr[15] + (op0 << 11);
+     return 1;
+ }
+ 
+ int Interpreter::blOffT(uint16_t opcode) { // BL label
+     // Long branch to offset with link (THUMB)
+     uint32_t op0 = (opcode & 0x7FF) << 1;
+-    uint32_t ret = *registers[15] - 1;
+-    *registers[15] = *registers[14] + op0;
++    uint32_t ret = registersUsr[15] - 1;
++    registersUsr[15] = *registers[14] + op0;
+     *registers[14] = ret;
+     flushPipeline();
+     return 3;
+@@ -250,8 +250,8 @@ int Interpreter::blxOffT(uint16_t opcode) { // BLX label
+     if (arm7) return 1; // ARM9 exclusive
+     uint32_t op0 = (opcode & 0x7FF) << 1;
+     cpsr &= ~BIT(5);
+-    uint32_t ret = *registers[15] - 1;
+-    *registers[15] = *registers[14] + op0;
++    uint32_t ret = registersUsr[15] - 1;
++    registersUsr[15] = *registers[14] + op0;
+     *registers[14] = ret;
+     flushPipeline();
+     return 3;
+@@ -260,6 +260,6 @@ int Interpreter::blxOffT(uint16_t opcode) { // BLX label
+ int Interpreter::swiT(uint16_t opcode) { // SWI #i
+     // Software interrupt (THUMB)
+     LOG_INFO("Triggering ARM%d software interrupt: 0x%X\n", arm7 ? 7 : 9, opcode & 0xFF);
+-    *registers[15] -= 4;
++    registersUsr[15] -= 4;
+     return exception(0x08);
+ }
 diff --git a/src/core/arm/interpreter_transfer.cpp b/src/core/arm/interpreter_transfer.cpp
-index 90c22bd..488ef76 100644
+index 90c22bd..e2c0ff0 100644
 --- a/src/core/arm/interpreter_transfer.cpp
 +++ b/src/core/arm/interpreter_transfer.cpp
+@@ -134,7 +134,7 @@ FORCE_INLINE int Interpreter::ldrsbOf(uint32_t opcode, uint32_t op2) { // LDRSB
+     *op0 = (int8_t)core->memory.read<uint8_t>(arm7, op1 + op2);
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     flushPipeline();
+     return 5;
+ }
+@@ -150,7 +150,7 @@ FORCE_INLINE int Interpreter::ldrshOf(uint32_t opcode, uint32_t op2) { // LDRSH
+         *op0 = (int16_t)*op0 >> 8;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     flushPipeline();
+     return 5;
+ }
+@@ -162,7 +162,7 @@ FORCE_INLINE int Interpreter::ldrbOf(uint32_t opcode, uint32_t op2) { // LDRB Rd
+     *op0 = core->memory.read<uint8_t>(arm7, op1 + op2);
+ 
+     // Handle pipelining and THUMB switching
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     cpsr |= (*op0 & !arm7) << 5;
+     flushPipeline();
+     return 5;
+@@ -188,7 +188,7 @@ FORCE_INLINE int Interpreter::ldrhOf(uint32_t opcode, uint32_t op2) { // LDRH Rd
+         *op0 = (*op0 << 24) | (*op0 >> 8);
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     flushPipeline();
+     return 5;
+ }
+@@ -215,7 +215,7 @@ FORCE_INLINE int Interpreter::ldrOf(uint32_t opcode, uint32_t op2) { // LDR Rd,[
+     }
+ 
+     // Handle pipelining and THUMB switching
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     cpsr |= (*op0 & !arm7) << 5;
+     flushPipeline();
+     return 5;
+@@ -257,7 +257,7 @@ FORCE_INLINE int Interpreter::ldrsbPr(uint32_t opcode, uint32_t op2) { // LDRSB
+     *op0 = (int8_t)core->memory.read<uint8_t>(arm7, *op1 += op2);
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     flushPipeline();
+     return 5;
+ }
+@@ -274,7 +274,7 @@ FORCE_INLINE int Interpreter::ldrshPr(uint32_t opcode, uint32_t op2) { // LDRSH
+         *op0 = (int16_t)*op0 >> 8;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     flushPipeline();
+     return 5;
+ }
+@@ -286,7 +286,7 @@ FORCE_INLINE int Interpreter::ldrbPr(uint32_t opcode, uint32_t op2) { // LDRB Rd
+     *op0 = core->memory.read<uint8_t>(arm7, *op1 += op2);
+ 
+     // Handle pipelining and THUMB switching
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     cpsr |= (*op0 & !arm7) << 5;
+     flushPipeline();
+     return 5;
+@@ -313,7 +313,7 @@ FORCE_INLINE int Interpreter::ldrhPr(uint32_t opcode, uint32_t op2) { // LDRH Rd
+         *op0 = (*op0 << 24) | (*op0 >> 8);
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     flushPipeline();
+     return 5;
+ }
+@@ -341,7 +341,7 @@ FORCE_INLINE int Interpreter::ldrPr(uint32_t opcode, uint32_t op2) { // LDR Rd,[
+     }
+ 
+     // Handle pipelining and THUMB switching
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     cpsr |= (*op0 & !arm7) << 5;
+     flushPipeline();
+     return 5;
+@@ -384,7 +384,7 @@ FORCE_INLINE int Interpreter::ldrsbPt(uint32_t opcode, uint32_t op2) { // LDRSB
+     *op0 = (int8_t)core->memory.read<uint8_t>(arm7, address);
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     flushPipeline();
+     return 5;
+ }
+@@ -401,7 +401,7 @@ FORCE_INLINE int Interpreter::ldrshPt(uint32_t opcode, uint32_t op2) { // LDRSH
+         *op0 = (int16_t)*op0 >> 8;
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     flushPipeline();
+     return 5;
+ }
+@@ -414,7 +414,7 @@ FORCE_INLINE int Interpreter::ldrbPt(uint32_t opcode, uint32_t op2) { // LDRB Rd
+     *op0 = core->memory.read<uint8_t>(arm7, address);
+ 
+     // Handle pipelining and THUMB switching
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     cpsr |= (*op0 & !arm7) << 5;
+     flushPipeline();
+     return 5;
+@@ -442,7 +442,7 @@ FORCE_INLINE int Interpreter::ldrhPt(uint32_t opcode, uint32_t op2) { // LDRH Rd
+         *op0 = (*op0 << 24) | (*op0 >> 8);
+ 
+     // Handle pipelining
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     flushPipeline();
+     return 5;
+ }
+@@ -471,7 +471,7 @@ FORCE_INLINE int Interpreter::ldrPt(uint32_t opcode, uint32_t op2) { // LDR Rd,[
+     }
+ 
+     // Handle pipelining and THUMB switching
+-    if (op0 != registers[15]) return (arm7 << 1) + 1;
++    if (op0 != &registersUsr[15]) return (arm7 << 1) + 1;
+     cpsr |= (*op0 & !arm7) << 5;
+     flushPipeline();
+     return 5;
+@@ -546,7 +546,7 @@ int Interpreter::ldmda(uint32_t opcode) { // LDMDA Rn, <Rlist>
+ 
+     // Handle pipelining and THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -574,7 +574,7 @@ int Interpreter::ldmia(uint32_t opcode) { // LDMIA Rn, <Rlist>
+ 
+     // Handle pipelining and THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -603,7 +603,7 @@ int Interpreter::ldmdb(uint32_t opcode) { // LDMDB Rn, <Rlist>
+ 
+     // Handle pipelining and THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -631,7 +631,7 @@ int Interpreter::ldmib(uint32_t opcode) { // LDMIB Rn, <Rlist>
+ 
+     // Handle pipelining and THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -663,7 +663,7 @@ int Interpreter::ldmdaW(uint32_t opcode) { // LDMDA Rn!, <Rlist>
+ 
+     // Handle pipelining and THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -702,7 +702,7 @@ int Interpreter::ldmiaW(uint32_t opcode) { // LDMIA Rn!, <Rlist>
+ 
+     // Handle pipelining and THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -742,7 +742,7 @@ int Interpreter::ldmdbW(uint32_t opcode) { // LDMDB Rn!, <Rlist>
+ 
+     // Handle pipelining and THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -781,7 +781,7 @@ int Interpreter::ldmibW(uint32_t opcode) { // LDMIB Rn!, <Rlist>
+ 
+     // Handle pipelining and THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -816,7 +816,7 @@ int Interpreter::ldmdaU(uint32_t opcode) { // LDMDA Rn, <Rlist>^
+     // Handle pipelining and mode/THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+     if (spsr) setCpsr(*spsr);
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -846,7 +846,7 @@ int Interpreter::ldmiaU(uint32_t opcode) { // LDMIA Rn, <Rlist>^
+     // Handle pipelining and mode/THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+     if (spsr) setCpsr(*spsr);
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -877,7 +877,7 @@ int Interpreter::ldmdbU(uint32_t opcode) { // LDMDB Rn, <Rlist>^
+     // Handle pipelining and mode/THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+     if (spsr) setCpsr(*spsr);
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -907,7 +907,7 @@ int Interpreter::ldmibU(uint32_t opcode) { // LDMIB Rn, <Rlist>^
+     // Handle pipelining and mode/THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+     if (spsr) setCpsr(*spsr);
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -941,7 +941,7 @@ int Interpreter::ldmdaUW(uint32_t opcode) { // LDMDA Rn!, <Rlist>^
+     // Handle pipelining and mode/THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+     if (spsr) setCpsr(*spsr);
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -982,7 +982,7 @@ int Interpreter::ldmiaUW(uint32_t opcode) { // LDMIA Rn!, <Rlist>^
+     // Handle pipelining and mode/THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+     if (spsr) setCpsr(*spsr);
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -1024,7 +1024,7 @@ int Interpreter::ldmdbUW(uint32_t opcode) { // LDMDB Rn!, <Rlist>^
+     // Handle pipelining and mode/THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+     if (spsr) setCpsr(*spsr);
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
+@@ -1065,7 +1065,7 @@ int Interpreter::ldmibUW(uint32_t opcode) { // LDMIB Rn!, <Rlist>^
+     // Handle pipelining and mode/THUMB switching
+     if (~opcode & BIT(15)) return m + (arm7 ? 2 : (m < 2));
+     if (spsr) setCpsr(*spsr);
+-    cpsr |= (*registers[15] & !arm7) << 5;
++    cpsr |= (registersUsr[15] & !arm7) << 5;
+     flushPipeline();
+     return m + 4;
+ }
 @@ -1118,7 +1118,7 @@ int Interpreter::msrIc(uint32_t opcode) { // MSR CPSR,#i
      // Rotate the immediate value
      uint32_t value = opcode & 0xFF;
      uint8_t shift = (opcode >> 7) & 0x1E;
 -    uint32_t op1 = (value << (32 - shift)) | (value >> shift);
 +    uint32_t op1 = rotateRight32(value, shift);
-
+ 
      // Write the first 8 bits of the status flags, only changing the CPU mode when not in user mode
      if (opcode & BIT(16)) {
 @@ -1139,7 +1139,7 @@ int Interpreter::msrIs(uint32_t opcode) { // MSR SPSR,#i
@@ -412,14 +1260,52 @@ index 90c22bd..488ef76 100644
      uint8_t shift = (opcode >> 7) & 0x1E;
 -    uint32_t op1 = (value << (32 - shift)) | (value >> shift);
 +    uint32_t op1 = rotateRight32(value, shift);
-
+ 
      // Write the saved status flags in 8-bit blocks
      for (int i = 0; i < 4; i++) {
+@@ -1338,7 +1338,7 @@ int Interpreter::strImm5T(uint16_t opcode) { // STR Rd,[Rb,#i]
+ int Interpreter::ldrPcT(uint16_t opcode) { // LDR Rd,[PC,#i]
+     // PC-relative word load, pre-adjust without writeback (THUMB)
+     uint32_t *op0 = registers[(opcode >> 8) & 0x7];
+-    uint32_t op1 = *registers[15] & ~0x3;
++    uint32_t op1 = registersUsr[15] & ~0x3;
+     uint32_t op2 = (opcode & 0xFF) << 2;
+     *op0 = core->memory.read<uint32_t>(arm7, op1 += op2);
+ 
+@@ -1438,9 +1438,9 @@ int Interpreter::popPcT(uint16_t opcode) { // POP <Rlist>,PC
+     }
+ 
+     // Load the program counter and handle pipelining
+-    *registers[15] = core->memory.read<uint32_t>(arm7, *registers[13]);
++    registersUsr[15] = core->memory.read<uint32_t>(arm7, *registers[13]);
+     *registers[13] += 4;
+-    cpsr &= ~((~(*registers[15]) & !arm7) << 5);
++    cpsr &= ~((~(registersUsr[15]) & !arm7) << 5);
+     flushPipeline();
+     return m + 4;
+ }
 diff --git a/src/core/core.cpp b/src/core/core.cpp
-index 8949d6e..2ad4f45 100644
+index 8949d6e..9bec794 100644
 --- a/src/core/core.cpp
 +++ b/src/core/core.cpp
-@@ -85,7 +85,15 @@ Core::Core(std::string ndsRom, std::string gbaRom, int id, int ndsRomFd, int gba
+@@ -42,7 +42,9 @@ Core::Core(std::string ndsRom, std::string gbaRom, int id, int ndsRomFd, int gba
+     if (!spi.loadFirmware() && req) throw dsiMode ? ERROR_DSI_FIRM : ERROR_NDS_FIRM;
+     realGbaBios = memory.loadGbaBios();
+ 
+-    // Define the tasks that can be scheduled
++    // Define the tasks that can be scheduled. Xenon dispatches tasks through
++    // a direct switch to avoid std::function's indirect-call overhead.
++#ifndef NOODS_XENON
+     tasks[UPDATE_RUN] = std::bind(&Core::updateRun, this);
+     tasks[RESET_CYCLES] = std::bind(&Core::resetCycles, this);
+     tasks[CART9_WORD_READY] = std::bind(&CartridgeNds::wordReady, &cartridgeNds, 0);
+@@ -80,12 +82,21 @@ Core::Core(std::string ndsRom, std::string gbaRom, int id, int ndsRomFd, int gba
+     tasks[NDMA7_UPDATE] = std::bind(&Ndma::update, &ndma[1]);
+     tasks[SDMMC_READ_BLOCK] = std::bind(&SdMmc::readBlock, &sdMmc);
+     tasks[SDMMC_WRITE_BLOCK] = std::bind(&SdMmc::writeBlock, &sdMmc);
++#endif
+ 
+     // Schedule initial tasks for NDS mode
      schedule(RESET_CYCLES, 0x7FFFFFFF);
      schedule(NDS_SCANLINE256, 256 * 6);
      schedule(NDS_SCANLINE355, 355 * 6);
@@ -432,10 +1318,10 @@ index 8949d6e..2ad4f45 100644
 +#else
      schedule(NDS_SPU_SAMPLE, 512 * 2);
 +#endif
-
+ 
      // Initialize memory maps and anything else that needs it
      memory.updateMap9(0x00000000, 0xFFFFFFFF);
-@@ -368,7 +376,17 @@ void Core::resetCycles() {
+@@ -368,10 +379,65 @@ void Core::resetCycles() {
  void Core::schedule(SchedTask task, uint32_t cycles) {
      // Add a task to the scheduler, sorted by least to most cycles until execution
      SchedEvent event(task, globalCycles + cycles);
@@ -452,8 +1338,56 @@ index 8949d6e..2ad4f45 100644
 +#endif
      events.insert(it, event);
  }
-
-@@ -383,7 +401,12 @@ void Core::enterGbaMode() {
+ 
++#ifdef NOODS_XENON
++void Core::runTask(SchedTask task) {
++    switch (task) {
++    case UPDATE_RUN: updateRun(); break;
++    case RESET_CYCLES: resetCycles(); break;
++    case CART9_WORD_READY: cartridgeNds.wordReady(0); break;
++    case CART7_WORD_READY: cartridgeNds.wordReady(1); break;
++    case DMA9_TRANSFER0: dma[0].transfer(0); break;
++    case DMA9_TRANSFER1: dma[0].transfer(1); break;
++    case DMA9_TRANSFER2: dma[0].transfer(2); break;
++    case DMA9_TRANSFER3: dma[0].transfer(3); break;
++    case DMA7_TRANSFER0: dma[1].transfer(0); break;
++    case DMA7_TRANSFER1: dma[1].transfer(1); break;
++    case DMA7_TRANSFER2: dma[1].transfer(2); break;
++    case DMA7_TRANSFER3: dma[1].transfer(3); break;
++    case NDS_SCANLINE256: gpu.scanline256(); break;
++    case NDS_SCANLINE355: gpu.scanline355(); break;
++    case GBA_SCANLINE240: gpu.gbaScanline240(); break;
++    case GBA_SCANLINE308: gpu.gbaScanline308(); break;
++    case GPU3D_COMMANDS: gpu3D.runCommands(); break;
++    case ARM9_INTERRUPT: interpreter[0].interrupt(); break;
++    case ARM7_INTERRUPT: interpreter[1].interrupt(); break;
++    case NDS_SPU_SAMPLE: spu.runSample(); break;
++    case GBA_SPU_SAMPLE: spu.runGbaSample(); break;
++    case TIMER9_OVERFLOW0: timers[0].overflow(0); break;
++    case TIMER9_OVERFLOW1: timers[0].overflow(1); break;
++    case TIMER9_OVERFLOW2: timers[0].overflow(2); break;
++    case TIMER9_OVERFLOW3: timers[0].overflow(3); break;
++    case TIMER7_OVERFLOW0: timers[1].overflow(0); break;
++    case TIMER7_OVERFLOW1: timers[1].overflow(1); break;
++    case TIMER7_OVERFLOW2: timers[1].overflow(2); break;
++    case TIMER7_OVERFLOW3: timers[1].overflow(3); break;
++    case WIFI_COUNT_MS: wifi.countMs(); break;
++    case WIFI_TRANS_REPLY: wifi.transmitPacket(CMD_REPLY); break;
++    case WIFI_TRANS_ACK: wifi.transmitPacket(CMD_ACK); break;
++    case AES_UPDATE: aes.update(); break;
++    case NDMA9_UPDATE: ndma[0].update(); break;
++    case NDMA7_UPDATE: ndma[1].update(); break;
++    case SDMMC_READ_BLOCK: sdMmc.readBlock(); break;
++    case SDMMC_WRITE_BLOCK: sdMmc.writeBlock(); break;
++    case MAX_TASKS: break;
++    }
++}
++#endif
++
+ void Core::enterGbaMode() {
+     // Switch to GBA mode
+     gbaMode = true;
+@@ -383,7 +449,12 @@ void Core::enterGbaMode() {
      schedule(RESET_CYCLES, 1);
      schedule(GBA_SCANLINE240, 240 * 4);
      schedule(GBA_SCANLINE308, 308 * 4);
@@ -463,9 +1397,49 @@ index 8949d6e..2ad4f45 100644
 +#else
      schedule(GBA_SPU_SAMPLE, 512);
 +#endif
-
+ 
      // Reset the system for GBA mode
      memory.updateMap7(0x00000000, 0xFFFFFFFF);
+@@ -411,6 +482,9 @@ void Core::endFrame() {
+     // Break execution at the end of a frame and count it
+     running.store(false);
+     fpsCount++;
++#ifdef NOODS_XENON
++    completedFrames++;
++#endif
+ 
+     // Run HLE ARM7 per-frame tasks if enabled
+     if (arm7Hle)
+diff --git a/src/core/core.h b/src/core/core.h
+index 42fec0d..cbf56f2 100644
+--- a/src/core/core.h
++++ b/src/core/core.h
+@@ -150,8 +150,15 @@ public:
+ 
+     std::atomic<bool> running;
+     std::vector<SchedEvent> events;
++#ifndef NOODS_XENON
+     std::function<void()> tasks[MAX_TASKS];
++#endif
+     uint32_t globalCycles = 0;
++#ifdef NOODS_XENON
++    // Frontends must distinguish a real emulated frame boundary from the
++    // internal scheduler returns caused by CPU halt/run state changes.
++    uint32_t completedFrames = 0;
++#endif
+ 
+     Core(std::string ndsRom = "", std::string gbaRom = "", int id = 0, int ndsRomFd = -1, int gbaRomFd = -1,
+         int ndsSaveFd = -1, int gbaSaveFd = -1, int ndsStateFd = -1, int gbaStateFd = -1, int ndsCheatFd = -1);
+@@ -160,6 +167,9 @@ public:
+ 
+     void runCore() { (*runFunc)(*this); }
+     void schedule(SchedTask task, uint32_t cycles);
++#ifdef NOODS_XENON
++    void runTask(SchedTask task);
++#endif
+     void enterGbaMode();
+     void endFrame();
+ 
 diff --git a/src/core/defines.h b/src/core/defines.h
 index 215d3a5..2be8f7e 100644
 --- a/src/core/defines.h
@@ -473,7 +1447,7 @@ index 215d3a5..2be8f7e 100644
 @@ -78,25 +78,93 @@
      b = c; \
  }
-
+ 
 -// Macros that read a value larger than 8 bits from an 8-bit array
 +// Read and write little-endian values without violating alignment or aliasing
 +// rules. The original pointer casts happened to work on the upstream targets,
@@ -494,7 +1468,7 @@ index 215d3a5..2be8f7e 100644
  #endif
 +    return value;
 +}
-
+ 
 -// Macro that stores a 32-bit value to an 8-bit array
 +FORCE_INLINE uint32_t readLe32(const void *data) {
 +    uint32_t value;
@@ -571,18 +1545,451 @@ index 215d3a5..2be8f7e 100644
 +    shift &= 31u;
 +    return shift ? ((value >> shift) | (value << (32u - shift))) : value;
 +}
-
+ 
  // Macros that perform bit rotations
  #define ROL8(v, s) ((v << s) | (v >> (8 - s)))
  #define ROL32(v, s) ((v << s) | (v >> (32 - s)))
 -#define ROR32(v, s) ((v >> s) | (v << (32 - s)))
 +#define ROR32(v, s) rotateRight32((v), (s))
+diff --git a/src/core/gpu/gpu.cpp b/src/core/gpu/gpu.cpp
+index b3bbed5..2b3c863 100644
+--- a/src/core/gpu/gpu.cpp
++++ b/src/core/gpu/gpu.cpp
+@@ -20,11 +20,31 @@
+ #include <cstring>
+ #include "../core.h"
+ 
++namespace {
++
++inline bool useHighResolutionOutput() {
++#ifdef NOODS_XENON
++    // The Xenon frontend supplies a native 256x384 framebuffer.  Keep this
++    // compile-time false even if an imported configuration changes the
++    // desktop high-resolution/filter settings, otherwise upstream getFrame()
++    // can write four times beyond the frontend's destination buffer.
++    return false;
++#else
++    return Settings::highRes3D || Settings::screenFilter == 1;
++#endif
++}
++
++} // namespace
++
+ Gpu::Gpu(Core *core): core(core) {
+     // Mark the thread as not drawing to start
+     ready.store(false);
+     running.store(false);
+     drawing.store(0);
++#ifdef NOODS_XENON
++    activeFrameSkip = Settings::frameskip;
++    requestedFrameSkip.store(activeFrameSkip, std::memory_order_relaxed);
++#endif
+ }
+ 
+ Gpu::~Gpu() {
+@@ -101,7 +121,7 @@ bool Gpu::getFrame(uint32_t *out, bool gbaCrop) {
+ 
+     if (gbaCrop) {
+         // Output the frame in RGB8 format, cropped for GBA
+-        if (Settings::highRes3D || Settings::screenFilter == 1) {
++        if (useHighResolutionOutput()) {
+             // GBA doesn't have 3D, but draw the screen upscaled for consistency
+             for (int y = 0; y < 160; y++) {
+                 uint32_t *line = &out[y * 240 * 4];
+@@ -125,7 +145,7 @@ bool Gpu::getFrame(uint32_t *out, bool gbaCrop) {
+         // The DS draws the GBA screen by capturing it to alternating VRAM blocks and then displaying that
+         // While not used officially, it's possible to copy images into VRAM before entering GBA mode to use as a border
+         // Output the GBA frame, centered, with the current VRAM border around it
+-        if (Settings::highRes3D || Settings::screenFilter == 1) {
++        if (useHighResolutionOutput()) {
+             // GBA doesn't have 3D, but draw the screen upscaled for consistency
+             for (int y = 0; y < 192; y++) {
+                 uint32_t *line = &out[offset * 4 + y * 256 * 4];
+@@ -151,7 +171,7 @@ bool Gpu::getFrame(uint32_t *out, bool gbaCrop) {
+     }
+     else {
+         // Output the full frame in RGB8 format
+-        if (Settings::highRes3D || Settings::screenFilter == 1) {
++        if (useHighResolutionOutput()) {
+             if (buffers.hiRes3D) {
+                 // Draw the screens upscaled, replacing any 3D pixels with high-res output
+                 for (int y = 0; y < 192 * 2; y++) {
+@@ -200,8 +220,8 @@ bool Gpu::getFrame(uint32_t *out, bool gbaCrop) {
+     if (Settings::screenGhost) {
+         // Get the size of the output framebuffer
+         static uint32_t prev[256 * 192 * 8];
+-        uint32_t width = (gbaCrop ? 240 : 256) << (Settings::highRes3D || Settings::screenFilter == 1);
+-        uint32_t height = (gbaCrop ? 160 : (192 * 2)) << (Settings::highRes3D || Settings::screenFilter == 1);
++        uint32_t width = (gbaCrop ? 240 : 256) << useHighResolutionOutput();
++        uint32_t height = (gbaCrop ? 160 : (192 * 2)) << useHighResolutionOutput();
+         uint32_t size = width * height;
+ 
+         // Blend output with the previous frame if ghosting is enabled
+@@ -222,6 +242,54 @@ bool Gpu::getFrame(uint32_t *out, bool gbaCrop) {
+     return true;
+ }
+ 
++#ifdef NOODS_XENON
++bool Gpu::getFrameXenon(uint16_t *out, bool gbaCrop) {
++    // Preserve upstream behavior exactly for the uncommon output modes. The
++    // Xenon build forces native resolution, so this buffer covers every such
++    // path (GBA crop, DS-to-GBA mode, and screen ghosting).
++    if (gbaCrop || core->gbaMode || Settings::screenGhost) {
++        static uint32_t fallback[256 * 192 * 2];
++        if (!getFrame(fallback, gbaCrop))
++            return false;
++
++        const uint32_t width = gbaCrop ? 240u : 256u;
++        const uint32_t height = gbaCrop ? 160u : 192u * 2u;
++        const uint32_t size = width * height;
++        for (uint32_t i = 0; i < size; ++i) {
++            const uint32_t color = fallback[i];
++            out[i] = static_cast<uint16_t>(
++                ((color >> 3) & 0x001Fu) |
++                ((color >> 6) & 0x03E0u) |
++                ((color >> 9) & 0x7C00u));
++        }
++        return true;
++    }
++
++    if (!ready.load())
++        return false;
++
++    Buffers &buffers = framebuffers.front();
++    for (int i = 0; i < 256 * 192 * 2; ++i)
++        out[i] = rgb6ToRgb5(buffers.framebuffer[i]) & 0x7FFFu;
++
++    delete[] buffers.framebuffer;
++    delete[] buffers.hiRes3D;
++
++    mutex.lock();
++    framebuffers.pop();
++    ready.store(!framebuffers.empty());
++    mutex.unlock();
++    return true;
++}
++
++void Gpu::requestFrameSkip(int skip) {
++    // Four-times mode hands off one rendered frame out of every four.
++    if (skip < 0) skip = 0;
++    if (skip > 3) skip = 3;
++    requestedFrameSkip.store(skip, std::memory_order_relaxed);
++}
++#endif
++
+ void Gpu::gbaScanline240() {
+     if (vCount < 160) {
+         if (thread) {
+@@ -289,7 +357,13 @@ void Gpu::gbaScanline308() {
+         }
+ 
+         // Update the frame count to skip frames when non-zero
+-        if (frames++ >= Settings::frameskip)
++        if (frames++ >=
++#ifdef NOODS_XENON
++            activeFrameSkip
++#else
++            Settings::frameskip
++#endif
++        )
+             frames = 0;
+ 
+         // Stop execution here in case the frontend needs to do things
+@@ -304,6 +378,16 @@ void Gpu::gbaScanline308() {
+     case 228: // End of frame
+         // Start the next frame
+         vCount = 0;
++#ifdef NOODS_XENON
++        {
++            const int requested = requestedFrameSkip.load(std::memory_order_relaxed);
++            if (requested != activeFrameSkip) {
++                activeFrameSkip = requested;
++                // A mode change always begins with a complete rendered frame.
++                frames = 0;
++            }
++        }
++#endif
+         core->gpu2D[0].reloadRegisters();
+ 
+         // Start the 2D thread if enabled
+@@ -340,6 +424,26 @@ void Gpu::gbaScanline308() {
+ }
+ 
+ void Gpu::scanline256() {
++#ifdef NOODS_XENON
++    // A game can arm display capture after the VBlank line-215 render latch
++    // but before visible line 0. Catch that narrow window before any pixels
++    // are consumed. If a newly requested direct-3D capture was not already
++    // rendered for display, initialize it and catch up the 48 scanlines that
++    // NooDS normally prepares during VBlank.
++    if (vCount == 0 && (dispCapCnt & BIT(31)) &&
++        (((dispCapCnt >> 29) & 0x3) != 1)) {
++        captureRenderFrame = true;
++        if (dispCapCnt & BIT(24)) {
++            capture3DFrame = true;
++            if (dirty3D & BIT(0)) {
++                dirty3D = BIT(1);
++                for (int line = 0; line < 48; line++)
++                    core->gpu3DRenderer.drawScanline(line);
++            }
++        }
++    }
++#endif
++
+     if (vCount < 192) {
+         if (thread) {
+             // Make sure the thread has started before changing the state
+@@ -358,7 +462,11 @@ void Gpu::scanline256() {
+                 break;
+             }
+         }
+-        else if (frames == 0) {
++        else if (frames == 0
++#ifdef NOODS_XENON
++                 || captureRenderFrame
++#endif
++        ) {
+             // Draw the current scanlines
+             core->gpu2D[0].drawScanline(vCount);
+             core->gpu2D[1].drawScanline(vCount);
+@@ -382,6 +490,17 @@ void Gpu::scanline256() {
+             // Get the VRAM destination address for the current scanline
+             uint32_t base = 0x6800000 + ((dispCapCnt & 0x00030000) >> 16) * 0x20000;
+             uint32_t writeOffset = ((dispCapCnt & 0x000C0000) >> 3) + vCount * width * 2;
++#ifdef NOODS_XENON
++            // Capture lines start on 256/512-byte boundaries and cannot cross
++            // a 4KB map page. Reuse the direct LCDC mapping for the complete
++            // line instead of repeating a page lookup for every pixel.
++            const uint32_t writeAddress =
++                base + (writeOffset & 0x1FFFF);
++            uint8_t *writeLine =
++                core->memory.writeMap9A[writeAddress >> 12];
++            if (writeLine)
++                writeLine += writeAddress & 0xFFF;
++#endif
+ 
+             // Copy the source contents to memory as a 15-bit bitmap
+             switch ((dispCapCnt & 0x60000000) >> 29) { // Capture source
+@@ -392,8 +511,17 @@ void Gpu::scanline256() {
+                 bool resShift = (Settings::highRes3D && (dispCapCnt & BIT(24)));
+ 
+                 // Copy a scanline to memory
+-                for (int i = 0; i < width; i++)
+-                    core->memory.write<uint16_t>(0, base + ((writeOffset + i * 2) & 0x1FFFF), rgb6ToRgb5(source[i << resShift]));
++                for (int i = 0; i < width; i++) {
++                    const uint16_t color = rgb6ToRgb5(source[i << resShift]);
++#ifdef NOODS_XENON
++                    if (writeLine)
++                        writeLe16Aligned(writeLine + i * 2, color);
++                    else
++#endif
++                        core->memory.write<uint16_t>(
++                            0, base + ((writeOffset + i * 2) & 0x1FFFF),
++                            color);
++                }
+                 break;
+             }
+ 
+@@ -405,11 +533,33 @@ void Gpu::scanline256() {
+ 
+                 // Get the VRAM source address for the current scanline
+                 uint32_t readOffset = ((dispCapCnt & 0x0C000000) >> 11) + vCount * width * 2;
++#ifdef NOODS_XENON
++                const uint32_t readAddress =
++                    base + (readOffset & 0x1FFFF);
++                uint8_t *readLine =
++                    core->memory.readMap9A[readAddress >> 12];
++                if (readLine)
++                    readLine += readAddress & 0xFFF;
++#endif
+ 
+                 // Copy a scanline to memory
+                 for (int i = 0; i < width; i++) {
+-                    uint16_t color = core->memory.read<uint16_t>(0, base + ((readOffset + i * 2) & 0x1FFFF));
+-                    core->memory.write<uint16_t>(0, base + ((writeOffset + i * 2) & 0x1FFFF), color);
++                    uint16_t color;
++#ifdef NOODS_XENON
++                    if (readLine)
++                        color = readLe16Aligned(readLine + i * 2);
++                    else
++#endif
++                        color = core->memory.read<uint16_t>(
++                            0, base + ((readOffset + i * 2) & 0x1FFFF));
++#ifdef NOODS_XENON
++                    if (writeLine)
++                        writeLe16Aligned(writeLine + i * 2, color);
++                    else
++#endif
++                        core->memory.write<uint16_t>(
++                            0, base + ((writeOffset + i * 2) & 0x1FFFF),
++                            color);
+                 }
+                 break;
+             }
+@@ -427,6 +577,14 @@ void Gpu::scanline256() {
+ 
+                 // Get the VRAM source address for the current scanline
+                 uint32_t readOffset = ((dispCapCnt & 0x0C000000) >> 11) + vCount * width * 2;
++#ifdef NOODS_XENON
++                const uint32_t readAddress =
++                    base + (readOffset & 0x1FFFF);
++                uint8_t *readLine =
++                    core->memory.readMap9A[readAddress >> 12];
++                if (readLine)
++                    readLine += readAddress & 0xFFF;
++#endif
+ 
+                 // Get the blending factors for the two sources
+                 uint8_t eva = std::min((dispCapCnt >> 0) & 0x1F, 16U);
+@@ -436,7 +594,14 @@ void Gpu::scanline256() {
+                 for (int i = 0; i < width; i++) {
+                     // Get colors from the two sources
+                     uint16_t c1 = rgb6ToRgb5(source[i << resShift]);
+-                    uint16_t c2 = core->memory.read<uint16_t>(0, base + ((readOffset + i * 2) & 0x1FFFF));
++                    uint16_t c2;
++#ifdef NOODS_XENON
++                    if (readLine)
++                        c2 = readLe16Aligned(readLine + i * 2);
++                    else
++#endif
++                        c2 = core->memory.read<uint16_t>(
++                            0, base + ((readOffset + i * 2) & 0x1FFFF));
+ 
+                     // Blend the color values
+                     uint8_t r = std::min((((c1 >> 0) & 0x1F) * eva + ((c2 >> 0) & 0x1F) * evb) / 16, 31);
+@@ -444,7 +609,14 @@ void Gpu::scanline256() {
+                     uint8_t b = std::min((((c1 >> 10) & 0x1F) * eva + ((c2 >> 10) & 0x1F) * evb) / 16, 31);
+ 
+                     uint16_t color = BIT(15) | (b << 10) | (g << 5) | r;
+-                    core->memory.write<uint16_t>(0, base + ((writeOffset + i * 2) & 0x1FFFF), color);
++#ifdef NOODS_XENON
++                    if (writeLine)
++                        writeLe16Aligned(writeLine + i * 2, color);
++                    else
++#endif
++                        core->memory.write<uint16_t>(
++                            0, base + ((writeOffset + i * 2) & 0x1FFFF),
++                            color);
+                 }
+                 break;
+             }}
+@@ -457,10 +629,42 @@ void Gpu::scanline256() {
+         }
+     }
+ 
++    // NooDS starts the next frame's 3D work 48 scanlines early during VBlank.
++    // Consume a live cadence change exactly before that frame's 3D line 0 so
++    // the 2D, 3D, and framebuffer paths all agree on whether it is rendered.
++#ifdef NOODS_XENON
++    if (vCount == 215) {
++        const int requested = requestedFrameSkip.load(std::memory_order_relaxed);
++        if (requested != activeFrameSkip) {
++            activeFrameSkip = requested;
++            // A mode change always begins with a complete rendered frame.
++            frames = 0;
++        }
++
++        // Display capture is guest-visible even when Turbo suppresses this
++        // frame's frontend handoff. Source B reads VRAM directly, but source A
++        // (alone or blended) needs current 2D pixels and may directly request
++        // 3D even when engine A is not displaying it.
++        captureRenderFrame =
++            (dispCapCnt & BIT(31)) &&
++            (((dispCapCnt >> 29) & 0x3) != 1);
++        capture3DFrame = captureRenderFrame && (dispCapCnt & BIT(24));
++    }
++#endif
++
+     // Draw 3D scanlines 48 lines in advance, if the current 3D is dirty
+     // If the 3D parameters haven't changed since the last frame, there's no need to draw it again
+     // Bit 0 of the dirty variable represents invalidation, and bit 1 represents a frame currently drawing
+-    if (frames == 0 && dirty3D && (core->gpu2D[0].readDispCnt() & BIT(3)) && ((vCount + 48) % 263) < 192) {
++    if ((frames == 0
++#ifdef NOODS_XENON
++         || captureRenderFrame
++#endif
++        ) && dirty3D &&
++        ((core->gpu2D[0].readDispCnt() & BIT(3))
++#ifdef NOODS_XENON
++         || capture3DFrame
++#endif
++        ) && ((vCount + 48) % 263) < 192) {
+         if (vCount == 215) dirty3D = BIT(1);
+         core->gpu3DRenderer.drawScanline((vCount + 48) % 263);
+         if (vCount == 143) dirty3D &= ~BIT(1);
+@@ -541,7 +745,13 @@ void Gpu::scanline355() {
+         }
+ 
+         // Update the frame count to skip frames when non-zero
+-        if (frames++ >= Settings::frameskip)
++        if (frames++ >=
++#ifdef NOODS_XENON
++            activeFrameSkip
++#else
++            Settings::frameskip
++#endif
++        )
+             frames = 0;
+ 
+         // Apply cheats and stop execution in case the frontend needs to do things
+@@ -562,7 +772,11 @@ void Gpu::scanline355() {
+         core->gpu2D[1].reloadRegisters();
+ 
+         // Start the 2D thread if enabled
+-        if (Settings::threaded2D && frames == 0 && !thread) {
++        if (Settings::threaded2D && (frames == 0
++#ifdef NOODS_XENON
++                                    || captureRenderFrame
++#endif
++                                   ) && !thread) {
+             running.store(true);
+             thread = new std::thread(&Gpu::drawThreaded, this);
+         }
+diff --git a/src/core/gpu/gpu.h b/src/core/gpu/gpu.h
+index 5919ba5..6aa06c0 100644
+--- a/src/core/gpu/gpu.h
++++ b/src/core/gpu/gpu.h
+@@ -39,7 +39,18 @@ public:
+     void loadState(FILE *file);
+ 
+     bool getFrame(uint32_t *out, bool gbaCrop);
++#ifdef NOODS_XENON
++    // Return the native DS image in the RGB555 index format consumed by the
++    // Xbox picture-adjustment lookup. Non-native/ghosting modes retain the
++    // upstream RGB8 path internally so their final output stays exact.
++    bool getFrameXenon(uint16_t *out, bool gbaCrop);
++#endif
+     void invalidate3D() { dirty3D |= BIT(0); }
++#ifdef NOODS_XENON
++    // Apply a new render cadence only at the next frame's 3D line-zero
++    // boundary. This keeps live Turbo changes from splitting a frame in half.
++    void requestFrameSkip(int skip);
++#endif
+ 
+     void gbaScanline240();
+     void gbaScanline308();
+@@ -73,6 +84,15 @@ private:
+     std::thread *thread = nullptr;
+ 
+     int frames = 0;
++#ifdef NOODS_XENON
++    std::atomic<int> requestedFrameSkip;
++    int activeFrameSkip = 0;
++    // A skipped frontend frame can still need fresh internal pixels when a
++    // game captures engine A into VRAM. Keep guest-visible capture rendering
++    // independent from framebuffer handoff cadence.
++    bool captureRenderFrame = false;
++    bool capture3DFrame = false;
++#endif
+     bool gbaBlock = true;
+     bool displayCapture = false;
+     uint8_t dirty3D = 0;
 diff --git a/src/core/gpu/gpu_3d_renderer.cpp b/src/core/gpu/gpu_3d_renderer.cpp
 index 7460cb8..91571e3 100644
 --- a/src/core/gpu/gpu_3d_renderer.cpp
 +++ b/src/core/gpu/gpu_3d_renderer.cpp
 @@ -113,6 +113,16 @@ uint32_t *Gpu3DRenderer::getLine1(int line) {
-
+ 
  void Gpu3DRenderer::drawScanline(int line) {
      if (line == 0) {
 +        // Update the resolution shift for the next frame
@@ -599,11 +2006,11 @@ index 7460cb8..91571e3 100644
          for (int i = 0; i < core->gpu3D.polygonCountOut; i++) {
              polygonTop[i] = 192 * 2;
 @@ -127,10 +137,24 @@ void Gpu3DRenderer::drawScanline(int line) {
-
+ 
              // Allow horizontal line polygons to be drawn
              if (polygonTop[i] == polygonBot[i]) polygonBot[i]++;
 -        }
-
+ 
 -        // Update the resolution shift for the next frame
 -        resShift = Settings::highRes3D;
 +#ifdef NOODS_XENON
@@ -623,13 +2030,13 @@ index 7460cb8..91571e3 100644
 +            }
 +#endif
 +        }
-
+ 
          // Clean up any existing threads
          for (size_t i = 0; i < threads.size(); i++) {
 @@ -230,6 +254,14 @@ void Gpu3DRenderer::drawScanline1(int line) {
-
+ 
      stencilClear[line] = false;
-
+ 
 +#ifdef NOODS_XENON
 +    // Draw the pre-binned polygons without scanning the complete polygon list
 +    // on every scanline. Both passes retain the original polygon order.
@@ -639,7 +2046,7 @@ index 7460cb8..91571e3 100644
 +        drawPolygon(line, polygonLines[line][2047 - i]);
 +#else
      std::vector<int> translucent;
-
+ 
      // Draw the polygons
 @@ -249,6 +281,7 @@ void Gpu3DRenderer::drawScanline1(int line) {
      // Draw the translucent polygons
@@ -647,7 +2054,7 @@ index 7460cb8..91571e3 100644
          drawPolygon(line, translucent[i]);
 +#endif
  }
-
+ 
  void Gpu3DRenderer::finishScanline(int line) {
 diff --git a/src/core/gpu/gpu_3d_renderer.h b/src/core/gpu/gpu_3d_renderer.h
 index 47e07ac..4f2ba7b 100644
@@ -656,7 +2063,7 @@ index 47e07ac..4f2ba7b 100644
 @@ -63,6 +63,16 @@ private:
      int polygonTop[2048] = {};
      int polygonBot[2048] = {};
-
+ 
 +#ifdef NOODS_XENON
 +    // Build ordered per-scanline polygon bins once per frame. The generic
 +    // renderer otherwise scans every polygon for every line, which dominates
@@ -689,7 +2096,7 @@ index eddacd2..2192079 100644
 --- a/src/core/io/spu.cpp
 +++ b/src/core/io/spu.cpp
 @@ -197,6 +197,9 @@ uint32_t *Spu::getSamples(int count) {
-
+ 
  void Spu::runGbaSample() {
      // Push a dummy sample if disabled and schedule the next one
 +#ifdef NOODS_XENON
@@ -697,9 +2104,9 @@ index eddacd2..2192079 100644
 +#endif
      core->schedule(GBA_SPU_SAMPLE, 512);
      if (!Settings::emulateAudio) return pushSample(0, 0);
-
+ 
 @@ -425,6 +428,9 @@ void Spu::runGbaSample() {
-
+ 
  void Spu::runSample() {
      // Push a dummy sample if disabled and schedule the next one
 +#ifdef NOODS_XENON
@@ -707,18 +2114,18 @@ index eddacd2..2192079 100644
 +#endif
      core->schedule(NDS_SPU_SAMPLE, 512 * 2);
      if (!Settings::emulateAudio) return pushSample(0, 0);
-
+ 
 diff --git a/src/core/memory/cartridge.cpp b/src/core/memory/cartridge.cpp
 index 45a3a8f..dfbd12f 100644
 --- a/src/core/memory/cartridge.cpp
 +++ b/src/core/memory/cartridge.cpp
 @@ -18,6 +18,7 @@
  */
-
+ 
  #include <cstring>
 +#include <climits>
  #include "../core.h"
-
+ 
  Cartridge::~Cartridge() {
 @@ -58,9 +59,11 @@ bool Cartridge::loadRom() {
      // Attempt to open a ROM file
@@ -732,12 +2139,12 @@ index 45a3a8f..dfbd12f 100644
 +    if (fileSize <= 0 || fileSize > INT_MAX || fseek(romFile, 0, SEEK_SET) != 0)
 +        return false;
 +    romSize = static_cast<int>(fileSize);
-
+ 
      // Attempt to load the ROM's save into memory
      if (FILE *saveFile = (saveFd == -1) ? fopen(savePath.c_str(), "rb") : fdopen(dup(saveFd), "rb")) {
 @@ -80,11 +83,59 @@ bool Cartridge::loadRom() {
  }
-
+ 
  void Cartridge::loadRomSection(size_t offset, size_t size) {
 -    // Load a section of the current ROM file into memory
 -    if (rom) delete[] rom;
@@ -799,7 +2206,7 @@ index 45a3a8f..dfbd12f 100644
 +    rom = next;
      if (!core->dsiMode) core->dldi.patchRom(rom, offset, size);
  }
-
+ 
 diff --git a/src/core/memory/memory.cpp b/src/core/memory/memory.cpp
 index 11f752a..a1ff162 100644
 --- a/src/core/memory/memory.cpp
@@ -812,7 +2219,7 @@ index 11f752a..a1ff162 100644
 +            value |= static_cast<T>(mappings[m][address + i]) << (i * 8);
      return value;
  }
-
+ 
 @@ -206,8 +206,11 @@ void Memory::updateMap9(uint32_t start, uint32_t end, bool tcm) {
      // Update the ARM9 read and write memory maps in the given range
      for (uint64_t address = start; address < end; address += 0x1000) {
@@ -825,7 +2232,7 @@ index 11f752a..a1ff162 100644
 +        uint8_t *&read = readMap[index];
 +        uint8_t *&write = writeMap[index];
          read = write = nullptr;
-
+ 
          // Map a 4KB block to the corresponding ARM9 memory, excluding special cases
 @@ -310,8 +313,9 @@ void Memory::updateMap7(uint32_t start, uint32_t end) {
      // Update the ARM7 read and write memory maps in the given range
@@ -837,7 +2244,7 @@ index 11f752a..a1ff162 100644
 +        uint8_t *&read = readMap7[index];
 +        uint8_t *&write = writeMap7[index];
          read = write = nullptr;
-
+ 
          if (core->gbaMode) { // GBA
 @@ -789,7 +793,7 @@ template <typename T> T Memory::readFallback(bool arm7, uint32_t address) {
      if (data) {
@@ -847,11 +2254,11 @@ index 11f752a..a1ff162 100644
 +            value |= static_cast<T>(data[i]) << (i * 8);
          return value;
      }
-
+ 
 @@ -2285,6 +2289,13 @@ void Memory::writeGbaHaltCnt(uint8_t value) {
          LOG_CRIT("Unhandled request for stop mode\n");
  }
-
+ 
 +// Keep the byte fallback available to callers in other translation units.
 +// Xenon GCC's -Ofast otherwise removes the only local instantiation while
 +// NooDS' inline fast path still references it from the rest of the core.
@@ -879,7 +2286,7 @@ index e215f59..c5fd672 100644
 +        if (sizeof(T) == 2) return static_cast<T>(readLe16Aligned(data));
 +        return static_cast<T>(readLe32Aligned(data));
      }
-
+ 
      // Handle special read cases that can't be mapped
 @@ -178,8 +177,12 @@ template <typename T> FORCE_INLINE void Memory::write(bool arm7, uint32_t addres
      uint8_t **writeMap = arm7 ? writeMap7 : (tcm ? writeMap9A : writeMap9B);
@@ -895,13 +2302,13 @@ index e215f59..c5fd672 100644
 +            writeLe32Aligned(data, static_cast<uint32_t>(value));
          return;
      }
-
+ 
 diff --git a/src/core/memory/sd_mmc.cpp b/src/core/memory/sd_mmc.cpp
 index a8b062e..ce8bf38 100644
 --- a/src/core/memory/sd_mmc.cpp
 +++ b/src/core/memory/sd_mmc.cpp
 @@ -22,8 +22,8 @@
-
+ 
  SdMmc::~SdMmc() {
      // Close the NAND and SD files
 -    fclose(nand);
@@ -909,5 +2316,5 @@ index a8b062e..ce8bf38 100644
 +    if (nand) fclose(nand);
 +    if (sd) fclose(sd);
  }
-
+ 
  void SdMmc::saveState(FILE *file) {

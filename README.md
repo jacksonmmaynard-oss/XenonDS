@@ -10,9 +10,11 @@ emulation cores adapted for the Xbox 360.
 
 > **Project status:** Experimental. XenonDS now boots a retail Nintendo DS game
 > on real Xbox 360 hardware with animated dual-screen video, controller input,
-> touch input, and persistent cartridge saves. The v0.8.1 preview adds separate
-> emulation/video counters, DS-oriented color correction, performance frame
-> skipping, a Xenon-oriented interpreter path, and multicore software 3D.
+> touch input, and persistent cartridge saves. The v0.9.1 release candidate
+> fixes the white-screen/0-FPS timing regression, adds validated frame-boundary
+> Turbo rendering, separates emulation and video-rate reporting, keeps live
+> display controls, and improves Xenon scheduling, presentation, and multicore
+> software 3D.
 > Audio, a ROM browser, and broad compatibility testing are not included yet.
 
 ## Hardware demo
@@ -40,9 +42,17 @@ as a real-console milestone, not a full-speed compatibility claim.
 - NooDS direct-boot core with no proprietary BIOS requirement
 - Persistent `.sav` loading and periodic/exit-time save flushing
 - Asynchronous Xbox framebuffer presentation on a second hardware thread
-- Separate on-screen emulation and displayed-video FPS counters
+- Separate on-screen emulated-frame, displayed-video, and real-time DS-speed
+  counters
 - Xenon-specific direct THUMB/branch dispatch and reverse-sorted event queue
-- Four-worker NooDS software-3D renderer with ordered scanline polygon bins
+- Three-worker NooDS software-3D renderer on hardware contexts 2/3/4, with
+  ordered scanline polygon bins and video presentation isolated on context 5
+- Stable complete-frame delivery with no internal scheduler slices counted as video
+- Persistent brightness, contrast, and color controls opened with R3
+- Left-trigger Turbo mode with an uncapped one-in-four video handoff and an
+  on-screen indicator
+- Capture-aware Turbo rendering that keeps guest VRAM video/cutscene captures current
+- Nonblocking framebuffer submission with bounded worker-failure diagnostics
 
 ## Build and test
 
@@ -81,7 +91,7 @@ Running the resulting `.elf32` file requires a homebrew-capable Xbox 360 and
 XeLL. Copy only a legally dumped `.nds` image to the USB drive; this milestone
 inspects metadata and does not execute the game yet.
 
-## NooDS v0.8.1 color and pacing preview
+## NooDS v0.9.1 validated Turbo build
 
 The current Xbox target uses a pinned and patched NooDS core. It boots the first valid
 `.nds` file found in `XenonDS/`, `xenonds/`, or the root of a mounted FAT
@@ -99,11 +109,13 @@ layout, add one legally dumped ROM as `XenonDS/game.nds`, boot XeLL, and press
 for controls and limitations.
 
 The build prints ROM-preload progress for large games. After `Core ready`, it
-paces every emulated DS frame and presents only newly completed video frames;
-internal NooDS scheduler slices are never mistaken for either. Invalid-instruction and prolonged
-blank-frame watchdogs stop with ARM9/ARM7 diagnostics instead of endlessly
-reloading XeLL. The television overlay reports separate EMU game-clock and VID
-displayed-frame rates.
+presents and paces only exact NooDS end-of-frame events. Internal CPU halt/resume
+scheduler returns are never mistaken for frames. Invalid-instruction and
+stopped-video watchdogs show ARM9/ARM7 diagnostics instead of silently hanging.
+Solid-color frames remain valid game output and are never treated as a failure.
+The overlay reports completed emulated frames, displayed-video frames, and
+actual game-clock speed separately; SPEED 100% means the emulated Nintendo DS
+is running in real time.
 
 The v0.7.1 optimization pass replaced expensive indirect dispatch for common
 THUMB instructions and ARM branches, uses native endian-correct mapped-memory
@@ -125,13 +137,34 @@ must be measured with the overlay.
 Real-console testing of v0.8.0 improved Pokemon Black's 3D-heavy scenes from
 about 9 FPS to a stable 22-23 FPS, with brief peaks near 30 FPS. Controller
 input, action scenes, and persistent cartridge saves were also verified. The
-v0.8.1 pass adds a one-frame performance skip so DS CPU/game-clock work keeps
-advancing while every other expensive video frame is omitted. Its overlay now
-reports EMU and VID separately, and a low-cost output lookup table compresses
-the Xbox analog video range to prevent clipped highlights and overdriven
-contrast.
+v0.8.3 build established a working full-frame baseline. A later frontend change
+incorrectly paced every return from `runCore()`, including internal CPU
+halt/resume boundaries; that could throttle scheduler slices to 60 per second
+before a real DS frame completed, producing two white screens and 0 FPS.
 
-GitHub Actions publishes three v0.8.1 artifacts from the same build: the
+v0.9.0 made `Core::endFrame()` the single owner of cadence, statistics, and
+save timing. Normal mode renders every completed frame. Left-trigger Turbo
+switches only at a frame boundary while DS CPU, input, timer, and game logic
+execution continue continuously. The presenter also copies only changed Xbox
+framebuffer tiles after its first frame. These paths pass deterministic
+frame-cadence, scheduler-return, framebuffer-hash, display-capture, and
+release-LTO tests. Capture-heavy games still receive fresh internal 2D/3D
+pixels when required, so Turbo cannot corrupt video or cutscene data stored in
+guest VRAM.
+
+v0.9.1 keeps that exact completed-frame ownership and replaces the ambiguous
+speed presets with two honest modes. Normal is capped at 60 Hz and presents
+every completed frame. Turbo is uncapped and hands one complete rendered frame
+in four to the television; it does not claim a fixed 2x multiplier. The overlay
+reports EMU, VID, and real DS-clock SPEED separately. Its Xenon scheduler calls
+the fixed task table directly, the optimized presenter uses precomputed tiled
+framebuffer offsets, and hardware context 5 is reserved exclusively for video.
+Deterministic replay tests cover scheduler-only returns, 602 completed frames,
+Turbo toggles, capture freshness, legitimate all-white output, 100 display-menu
+open/close cycles, and exact framebuffer hashes. Real-console performance still
+depends on the game and scene.
+
+GitHub Actions publishes three v0.9.1 artifacts from the same build: the
 USB-ready runtime, unstripped debug symbols, and a corresponding-source archive
 containing the exact pinned NooDS source used by the executable.
 

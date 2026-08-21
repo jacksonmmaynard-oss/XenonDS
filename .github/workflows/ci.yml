@@ -6,9 +6,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   host-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -23,7 +27,8 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   noods-core-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -31,14 +36,21 @@ jobs:
       - name: Fetch pinned NooDS core
         run: bash scripts/fetch_noods.sh
 
-      - name: Exercise NooDS ARM, memory, input, and video paths
+      - name: Exercise NooDS ARM, memory, Turbo capture, and video paths
         run: bash scripts/test_noods_core.sh
 
       - name: Check the Xbox frontend against its LibXenon API surface
         run: bash scripts/test_xenon_frontend_syntax.sh
 
+      - name: Exercise bounded nonblocking video submission
+        run: bash scripts/test_noods_video.sh
+
+      - name: Exercise exact pacing with legitimate uniform frames
+        run: bash scripts/test_noods_frontend.sh
+
   xenon-runtime:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -59,7 +71,8 @@ jobs:
           if-no-files-found: error
 
   xenon-desmume-checkpoint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -89,38 +102,57 @@ jobs:
           if-no-files-found: error
 
   xenon-noods-release:
-    runs-on: ubuntu-latest
+    needs: [host-tests, noods-core-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Build NooDS runtime and staged loader
-        run: >-
-          docker run --rm
-          -v "$GITHUB_WORKSPACE:/app"
-          -w /app
-          free60/libxenon:latest
-          bash -lc "bash scripts/fetch_noods.sh && make -C platform/xenon clean WITH_NOODS=1 && make -C platform/xenon WITH_NOODS=1 && make -C platform/xenon/loader clean && make -C platform/xenon/loader && bash scripts/package_noods_runtime.sh && bash scripts/package_noods_source.sh"
+        run: |
+          docker pull free60/libxenon:latest
+          LIBXENON_IMAGE="$(docker image inspect --format='{{index .RepoDigests 0}}' free60/libxenon:latest)"
+          test -n "$LIBXENON_IMAGE"
+          docker run --rm \
+            -e LIBXENON_IMAGE="$LIBXENON_IMAGE" \
+            -v "$GITHUB_WORKSPACE:/app" \
+            -w /app \
+            "$LIBXENON_IMAGE" \
+            bash -lc "bash scripts/fetch_noods.sh && make -C platform/xenon clean WITH_NOODS=1 && make -C platform/xenon WITH_NOODS=1 && make -C platform/xenon/loader clean && make -C platform/xenon/loader && bash scripts/package_noods_runtime.sh && bash scripts/package_noods_source.sh"
 
-      - name: Upload USB-ready v0.8.1 runtime
+      - name: Verify v0.9.1 release files
+        run: |
+          test -s platform/xenon/release-noods/xenon.elf
+          test -s platform/xenon/release-noods/XenonDS/xenonds-core.elf32
+          test -s platform/xenon/xenonds-noods.elf
+          test -s platform/xenon/build-noods/xenonds-noods.elf.map
+          test -s platform/xenon/XenonDS-v0.9.1-source.tar.gz
+          grep -q '^XenonDS v0.9.1' platform/xenon/release-noods/VERSION.txt
+          grep -a -q 'v0.9.1' platform/xenon/release-noods/xenon.elf
+          grep -a -q 'v0.9.1' platform/xenon/release-noods/XenonDS/xenonds-core.elf32
+          (cd platform/xenon/release-noods && sha256sum -c SHA256SUMS)
+          tar -tzf platform/xenon/XenonDS-v0.9.1-source.tar.gz | grep -q '^XenonDS-v0.9.1/BUILD_PROVENANCE.txt$'
+
+      - name: Upload USB-ready v0.9.1 runtime
         uses: actions/upload-artifact@v4
         with:
-          name: XenonDS-v0.8.1-noods-runtime
+          name: XenonDS-v0.9.1-noods-runtime
           path: platform/xenon/release-noods
           if-no-files-found: error
 
-      - name: Upload v0.8.1 debug symbols
+      - name: Upload v0.9.1 debug symbols
         uses: actions/upload-artifact@v4
         with:
-          name: XenonDS-v0.8.1-noods-symbols
+          name: XenonDS-v0.9.1-noods-symbols
           path: |
             platform/xenon/xenonds-noods.elf
             platform/xenon/build-noods/xenonds-noods.elf.map
           if-no-files-found: error
 
-      - name: Upload v0.8.1 corresponding source
+      - name: Upload v0.9.1 corresponding source
         uses: actions/upload-artifact@v4
         with:
-          name: XenonDS-v0.8.1-source
-          path: platform/xenon/XenonDS-v0.8.1-source.tar.gz
+          name: XenonDS-v0.9.1-source
+          path: platform/xenon/XenonDS-v0.9.1-source.tar.gz
           if-no-files-found: error

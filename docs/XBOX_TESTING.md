@@ -1,8 +1,8 @@
 # Xbox 360 runtime test
 
 XenonDS provides a hardware probe, a legacy DeSmuME performance checkpoint,
-and the v0.8.1 NooDS color and pacing preview. The NooDS build enters the live game loop
-with controller/touch input and persistent cartridge saves.
+and the v0.9.1 NooDS validated Turbo build. The NooDS build enters the live
+game loop with controller/touch input and persistent cartridge saves.
 
 ## Prepare the USB drive
 
@@ -94,25 +94,46 @@ match their printed DS labels: A/B/X/Y become DS A/B/X/Y. The D-pad, bumpers,
 Menu/View buttons become the DS D-pad, L/R, and Start/Select. Move the touch
 cursor with the right stick and touch with the right trigger.
 
+Click the right stick (R3) to open display settings. Use D-pad up/down to select
+Brightness, Contrast, or Color; left/right changes it immediately; A restores
+the defaults; B or R3 saves and closes. Settings persist beside the ROM in
+`xenonds-display.cfg`. Left trigger toggles Turbo mode. Turbo removes the normal
+60 Hz cap and sends one complete rendered frame in four to the television while
+the DS CPUs, input, timers, and game logic continue running continuously.
+
 The emulator creates `game.sav` beside `game.nds`, writes changed save data
 periodically, and flushes it again when **Guide** exits. The current target has
 no audio, ROM browser, save-state UI, microphone input, or network UI. Direct
 boot does not require Nintendo DS BIOS or firmware files.
 
 For a large ROM, wait for the `ROM preload` line to reach `100%`; do not power
-off while the USB drive is being read. A successful v0.8.1 startup then prints
+off while the USB drive is being read. A successful v0.9.1 startup then prints
 `Core ready. Running game...` and switches to the two DS screens. The frontend
-updates the television only when NooDS completes a new DS frame, so startup is
-no longer delayed once per internal scheduler slice. The upper-left overlay
-separates EMU game-clock throughput from VID displayed-frame throughput. The
-default one-frame performance skip reduces expensive rendering without skipping
-DS CPU or input execution. Both counters initially display `00.0`.
+updates and paces the television only at exact NooDS end-of-frame events.
+Internal CPU halt/resume scheduler returns are neither counted nor delayed as
+frames. The upper-left overlay shows EMU for completed emulated frames per
+second, VID for frames sent to the television, and SPEED for real-time DS-clock
+progress. SPEED 100% is full DS speed; 33% means the game is advancing at
+roughly one third of normal speed regardless of EMU or VID. Values begin at
+zero during the first sample.
 
-If startup remains blank for 600 completed DS frames or the emulated CPUs hit
-the invalid-opcode limit, XenonDS returns to a diagnostic screen containing the
-ARM9 and ARM7 program counters and last invalid opcodes. Photograph that whole
-screen for a bug report. A XeLL crash screen should be reported with its full
-stack dump and the matching unstripped v0.8.1 symbols artifact.
+Normal mode renders every completed frame and applies the normal 60 Hz cap.
+Turbo is uncapped and hands one complete rendered frame in four to the
+television, reducing renderer and presentation work without skipping DS CPU,
+input, timer, or game-logic execution. Turbo can increase SPEED when rendering
+is the bottleneck; it does not guarantee 2x speed in a CPU-bound scene, and VID
+is intentionally lower than EMU. If the game captures a DS screen or 3D output
+into its own VRAM, XenonDS still renders the required internal source. This
+preserves capture-based cutscenes and effects while leaving the external
+one-in-four handoff cadence unchanged.
+
+Uniform white or black frames are valid game output and do not trigger an
+error. If completed DS frames stop producing framebuffer handoffs, the display
+worker stops accepting frames, or the emulated CPUs hit the invalid-opcode
+limit, XenonDS returns to a diagnostic screen containing the ARM9 and ARM7
+program counters and last invalid opcodes. Photograph that whole screen for a
+bug report. A XeLL crash screen should be reported with its full stack dump and
+the matching unstripped v0.9.1 symbols artifact.
 
 The release is considered hardware-certified only after the exact runtime
 artifact reaches animated game graphics, responds to a controller input, and

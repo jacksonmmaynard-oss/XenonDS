@@ -2,9 +2,9 @@
 #pragma once
 
 // Small std::thread subset backed by LibXenon's hardware-thread task API.
-// XenonDS reserves both hardware contexts on each non-main physical core for
-// NooDS 3D workers. Presentation uses the main core's sibling context so
-// rasterization and display can overlap safely.
+// XenonDS reserves contexts 2/3/4 for NooDS 3D workers. Presentation uses
+// context 5, leaving the main emulation context 0's SMT sibling 1 idle so the
+// interpreter does not compete for issue slots.
 namespace xenonds_thread_compat {
 
 class Task {

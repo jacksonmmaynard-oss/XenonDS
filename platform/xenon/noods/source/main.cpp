@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "noods_video.hpp"
 #include "rom_finder.hpp"
+#include "speed_mode.hpp"
 #include "xenonds/controller_mapper.hpp"
 
 #include "core.h"
@@ -25,20 +26,13 @@
 
 namespace {
 
-const unsigned long kTargetFrameMicroseconds = 16715;
-const unsigned int kStatsWindowFrames = 30;
-const unsigned int kBlankFrameLimit = 600;
+const unsigned long kFrameProgressTimeoutMicroseconds = 10000000UL;
+const unsigned long kSaveIntervalMicroseconds = 5000000UL;
+const unsigned int kSchedulerReturnLimit = 1024;
+const unsigned int kVideoHandoffLimit = 8;
+const unsigned int kVideoSubmissionLimit = 240;
 const std::uint32_t kUnknownOpcodeLimit = 4096;
-std::uint32_t ds_frame[xenonds::kCombinedPixelCount];
-
-bool frame_has_content(const std::uint32_t* frame) {
-    const std::uint32_t first = frame[0];
-    for (std::size_t i = 1; i < xenonds::kCombinedPixelCount; ++i) {
-        if (frame[i] != first)
-            return true;
-    }
-    return false;
-}
+std::uint16_t ds_frame[xenonds::kCombinedPixelCount];
 
 xenonds::ControllerSnapshot snapshot_from_pad(const controller_data_s& pad) {
     xenonds::ControllerSnapshot snapshot;
@@ -79,6 +73,47 @@ std::string parent_path(const std::string& path) {
     return slash == std::string::npos ? "." : path.substr(0, slash);
 }
 
+template <typename T>
+T clamp_value(T value, T minimum, T maximum) {
+    return value < minimum ? minimum : (value > maximum ? maximum : value);
+}
+
+bool load_picture_settings(const std::string& path,
+                           xenonds::xenon::PictureSettings* settings) {
+    FILE* file = std::fopen(path.c_str(), "r");
+    if (!file) return false;
+
+    int brightness = 0;
+    unsigned int contrast = 0;
+    unsigned int saturation = 0;
+    const int fields = std::fscanf(
+        file, "brightness=%d\ncontrast=%u\nsaturation=%u",
+        &brightness, &contrast, &saturation);
+    std::fclose(file);
+    if (fields != 3) return false;
+
+    settings->brightness = clamp_value(brightness, -64, 64);
+    settings->contrast = clamp_value(contrast, 50u, 150u);
+    settings->saturation = clamp_value(saturation, 0u, 150u);
+    return true;
+}
+
+bool save_picture_settings(const std::string& path,
+                           const xenonds::xenon::PictureSettings& settings) {
+    FILE* file = std::fopen(path.c_str(), "w");
+    if (!file) return false;
+    const int written = std::fprintf(
+        file, "brightness=%d\ncontrast=%u\nsaturation=%u\n",
+        settings.brightness, settings.contrast, settings.saturation);
+    const int closed = std::fclose(file);
+    return written > 0 && closed == 0;
+}
+
+bool menu_controls_released(const controller_data_s& pad) {
+    return !pad.s2_z && !pad.a && !pad.b && !pad.up && !pad.down &&
+           !pad.left && !pad.right;
+}
+
 void configure_noods(const std::string& rom_path) {
     Settings::basePath = parent_path(rom_path);
     Settings::directBoot = 1;
@@ -87,14 +122,13 @@ void configure_noods(const std::string& rom_path) {
     // so preload the image once and execute from a verified in-memory copy.
     Settings::romInRam = 1;
     Settings::fpsLimiter = 0;
-    // Render every other frame by default. The DS CPU and game clock still
-    // execute every frame, while expensive 2D/3D drawing is skipped when the
-    // console cannot sustain full speed.
-    Settings::frameskip = 1;
+    // Preserve the exact full-frame path proven by the working v0.8.3 build.
+    // Turbo changes this at runtime only after the user requests it.
+    Settings::frameskip = 0;
     Settings::threaded2D = 0;
-    // Split software 3D scanlines across both hardware contexts on the two
-    // non-main physical CPU cores.
-    Settings::threaded3D = 4;
+    // Leave the emulation thread alone on physical core 0. Three software-3D
+    // workers use contexts 2/3/4, while presentation uses context 5.
+    Settings::threaded3D = 3;
     Settings::highRes3D = 0;
     Settings::screenGhost = 0;
     Settings::emulateAudio = 0;
@@ -153,7 +187,7 @@ int main() {
     xenon_ata_init();
     xenon_atapi_init();
 
-    std::printf("XenonDS NooDS color and pacing integration v0.8.1\n");
+    std::printf("XenonDS NooDS validated Turbo v0.9.1\n");
     if (!xenonds::xenon::initialize_noods_video()) {
         fail("Xbox framebuffer information is invalid");
         return 1;
@@ -174,6 +208,15 @@ int main() {
     std::printf("Title: %s  Code: %s\n",
                 rom.header.title.c_str(), rom.header.game_code.c_str());
     std::printf("Starting NooDS (direct boot, software renderer)...\n");
+    const std::string picture_path =
+        parent_path(rom.path) + "/xenonds-display.cfg";
+    xenonds::xenon::PictureSettings picture;
+    if (load_picture_settings(picture_path, &picture))
+        std::printf("Loaded picture settings: %s\n", picture_path.c_str());
+    if (!xenonds::xenon::set_noods_picture_settings(picture)) {
+        fail("The video worker did not accept the initial picture settings");
+        return 1;
+    }
     configure_noods(rom.path);
 
     Core* core = nullptr;
@@ -197,15 +240,36 @@ int main() {
     xenonds::ControllerMapper mapper;
     xenonds::InputState input;
     controller_data_s pad;
-    unsigned int frames_since_save = 0;
-    unsigned int blank_frames = 0;
-    bool saw_content = false;
+    unsigned int completed_without_video = 0;
+    unsigned int completed_without_submission = 0;
     std::uint64_t last_frame_tick = mftb();
+    std::uint64_t last_completed_tick = last_frame_tick;
+    std::uint64_t last_save_tick = last_frame_tick;
     std::uint64_t stats_window_tick = last_frame_tick;
+    unsigned int scheduler_returns_without_frame = 0;
+    unsigned long pending_core_microseconds = 0;
     unsigned long stats_core_microseconds = 0;
     unsigned int stats_emulated_frames = 0;
     unsigned int stats_video_frames = 0;
     xenonds::xenon::PerformanceStats performance;
+    performance.picture = picture;
+    xenonds::xenon::SpeedMode speed_mode =
+        xenonds::xenon::SpeedMode::Normal;
+    bool picture_menu_open = false;
+    unsigned int picture_menu_item = 0;
+    bool suppress_game_input = false;
+    bool previous_left_trigger = false;
+    bool previous_menu = false;
+    bool previous_up = false;
+    bool previous_down = false;
+    bool previous_left = false;
+    bool previous_right = false;
+    bool previous_a = false;
+    bool previous_b = false;
+    bool have_frame = false;
+    bool display_dirty = false;
+    bool video_frame_pending = false;
+    bool picture_settings_dirty = false;
 
     for (;;) {
         usb_do_poll();
@@ -213,13 +277,126 @@ int main() {
         get_controller_data(&pad, 0);
         if (pad.logo) {
             xenonds::xenon::wait_for_noods_video();
+            save_picture_settings(picture_path, picture);
             core->cartridgeNds.writeSave();
             delete core;
             return 0;
         }
 
-        input = mapper.map(snapshot_from_pad(pad));
+        const bool left_trigger = pad.lt > 32;
+        const bool menu_button = pad.s2_z != 0;
+        const bool up = pad.up != 0;
+        const bool down = pad.down != 0;
+        const bool left = pad.left != 0;
+        const bool right = pad.right != 0;
+        const bool a = pad.a != 0;
+        const bool b = pad.b != 0;
+
+        if (left_trigger && !previous_left_trigger) {
+            speed_mode = xenonds::xenon::toggle_speed_mode(speed_mode);
+            // Rendering cadence is independent from emulated time. Turbo is
+            // uncapped and hands off one complete rendered frame in four.
+            core->gpu.requestFrameSkip(
+                xenonds::xenon::speed_mode_config(speed_mode).frame_skip);
+
+            // Begin a fresh measurement window with the new cadence. Mixing
+            // pre- and post-switch frames can make Turbo appear slower for up
+            // to a second even when completed-frame throughput increased.
+            stats_window_tick = mftb();
+            stats_core_microseconds = 0;
+            stats_emulated_frames = 0;
+            stats_video_frames = 0;
+            performance.emulation_fps_tenths = 0;
+            performance.video_fps_tenths = 0;
+            performance.game_speed_percent = 0;
+            performance.core_microseconds = 0;
+            display_dirty = true;
+        }
+
+        if (menu_button && !previous_menu) {
+            picture_menu_open = !picture_menu_open;
+            suppress_game_input = true;
+            display_dirty = true;
+            if (!picture_menu_open)
+                save_picture_settings(picture_path, picture);
+        }
+
+        if (picture_menu_open) {
+            if (up && !previous_up)
+                picture_menu_item = (picture_menu_item + 2) % 3;
+            if (down && !previous_down)
+                picture_menu_item = (picture_menu_item + 1) % 3;
+
+            bool changed = false;
+            if ((left && !previous_left) || (right && !previous_right)) {
+                const int direction = right ? 1 : -1;
+                if (picture_menu_item == 0) {
+                    picture.brightness = clamp_value(
+                        picture.brightness + direction * 4, -64, 64);
+                }
+                else if (picture_menu_item == 1) {
+                    picture.contrast = static_cast<unsigned int>(clamp_value(
+                        static_cast<int>(picture.contrast) + direction * 5,
+                        50, 150));
+                }
+                else {
+                    picture.saturation = static_cast<unsigned int>(clamp_value(
+                        static_cast<int>(picture.saturation) + direction * 5,
+                        0, 150));
+                }
+                changed = true;
+            }
+            if (a && !previous_a) {
+                picture = xenonds::xenon::PictureSettings();
+                changed = true;
+            }
+            if (changed)
+                picture_settings_dirty = true;
+            display_dirty = display_dirty || changed;
+            if (b && !previous_b) {
+                picture_menu_open = false;
+                suppress_game_input = true;
+                display_dirty = true;
+                save_picture_settings(picture_path, picture);
+            }
+        }
+
+        const xenonds::xenon::SpeedModeConfig mode =
+            xenonds::xenon::speed_mode_config(speed_mode);
+        performance.turbo_enabled = mode.turbo_enabled;
+        performance.picture_menu_open = picture_menu_open;
+        performance.picture_menu_item = picture_menu_item;
+        performance.picture = picture;
+
+        // A presentation may still be reading the active color table. Never
+        // block emulation waiting for it: keep the update dirty and retry as
+        // soon as the worker is idle.
+        if (picture_settings_dirty &&
+            xenonds::xenon::set_noods_picture_settings(picture, 0)) {
+            picture_settings_dirty = false;
+            display_dirty = true;
+        }
+
+        if (picture_menu_open || suppress_game_input) {
+            input = xenonds::InputState();
+            if (!picture_menu_open && menu_controls_released(pad))
+                suppress_game_input = false;
+        }
+        else {
+            input = mapper.map(snapshot_from_pad(pad));
+        }
+
+        previous_left_trigger = left_trigger;
+        previous_menu = menu_button;
+        previous_up = up;
+        previous_down = down;
+        previous_left = left;
+        previous_right = right;
+        previous_a = a;
+        previous_b = b;
+
         apply_input(*core, input);
+        const std::uint32_t completed_before = core->completedFrames;
         const std::uint64_t core_start_tick = mftb();
         try {
             core->runCore();
@@ -244,59 +421,103 @@ int main() {
         }
         const unsigned long core_elapsed =
             tb_diff_usec(mftb(), core_start_tick);
-        stats_core_microseconds += core_elapsed;
-        ++stats_emulated_frames;
-
-        const bool frame_ready = core->gpu.getFrame(ds_frame, false);
+        pending_core_microseconds += core_elapsed;
+        const std::uint32_t completed_count =
+            core->completedFrames - completed_before;
+        const bool frame_ready = core->gpu.getFrameXenon(ds_frame, false);
         if (frame_ready) {
-            ++stats_video_frames;
+            have_frame = true;
+            completed_without_video = 0;
+            display_dirty = true;
+            video_frame_pending = true;
+        }
 
-            if (!saw_content) {
-                saw_content = frame_has_content(ds_frame);
-                if (!saw_content)
-                    ++blank_frames;
-            }
-            xenonds::xenon::present_noods_frame(
+        // Keep only the newest completed image when presentation overlaps the
+        // next emulation slice. A busy worker is never waited on and never has
+        // its queued frame overwritten; display_dirty makes this retry on the
+        // next scheduler return.
+        const bool submitted_frame =
+            display_dirty && have_frame && !picture_settings_dirty &&
+            xenonds::xenon::try_present_noods_frame(
                 ds_frame, input.touch, performance);
+        if (submitted_frame) {
+            display_dirty = false;
+            completed_without_submission = 0;
+            if (video_frame_pending) {
+                video_frame_pending = false;
+                ++stats_video_frames;
+            }
         }
 
-        const unsigned long window_microseconds =
-            tb_diff_usec(mftb(), stats_window_tick);
-        if (stats_emulated_frames >= kStatsWindowFrames &&
-            window_microseconds >= 1000000UL) {
-            performance.emulation_fps_tenths = static_cast<unsigned int>(
-                (static_cast<unsigned long long>(stats_emulated_frames) *
-                 10000000ULL + window_microseconds / 2) /
-                window_microseconds);
-            performance.video_fps_tenths = static_cast<unsigned int>(
-                (static_cast<unsigned long long>(stats_video_frames) *
-                 10000000ULL + window_microseconds / 2) /
-                window_microseconds);
-            performance.core_microseconds =
-                stats_core_microseconds / stats_emulated_frames;
-            stats_window_tick = mftb();
-            stats_core_microseconds = 0;
-            stats_emulated_frames = 0;
-            stats_video_frames = 0;
+        if (completed_count != 0) {
+            // runCore() also returns when an emulated CPU halts or resumes.
+            // Only Core::endFrame() owns cadence, statistics, and save timing.
+            stats_core_microseconds += pending_core_microseconds;
+            pending_core_microseconds = 0;
+            scheduler_returns_without_frame = 0;
+            last_completed_tick = mftb();
+            stats_emulated_frames += completed_count;
+            if (!frame_ready)
+                completed_without_video += completed_count;
+            if (!submitted_frame && display_dirty && have_frame)
+                completed_without_submission += completed_count;
+
+            const unsigned long window_microseconds =
+                tb_diff_usec(mftb(), stats_window_tick);
+            if (window_microseconds >= 1000000UL) {
+                const unsigned int emulation_fps_tenths =
+                    static_cast<unsigned int>(
+                        (static_cast<unsigned long long>(stats_emulated_frames) *
+                         10000000ULL + window_microseconds / 2) /
+                        window_microseconds);
+                performance.emulation_fps_tenths = emulation_fps_tenths;
+                performance.video_fps_tenths = static_cast<unsigned int>(
+                    (static_cast<unsigned long long>(stats_video_frames) *
+                     10000000ULL + window_microseconds / 2) /
+                    window_microseconds);
+                performance.game_speed_percent = clamp_value(
+                    (emulation_fps_tenths + 3u) / 6u, 0u, 999u);
+                performance.core_microseconds = stats_emulated_frames != 0 ?
+                    stats_core_microseconds / stats_emulated_frames : 0;
+
+                stats_window_tick = mftb();
+                stats_core_microseconds = 0;
+                stats_emulated_frames = 0;
+                stats_video_frames = 0;
+            }
+
+            const unsigned long elapsed =
+                tb_diff_usec(mftb(), last_frame_tick);
+            if (mode.frame_cap_microseconds != 0 &&
+                elapsed < mode.frame_cap_microseconds) {
+                udelay(static_cast<int>(
+                    mode.frame_cap_microseconds - elapsed));
+            }
+            last_frame_tick = mftb();
+
+            // Save against wall time, not emulated frames. Fast modes must not
+            // turn a five-second checkpoint into FAT writes every 1.25s.
+            if (tb_diff_usec(last_frame_tick, last_save_tick) >=
+                kSaveIntervalMicroseconds) {
+                core->cartridgeNds.writeSave();
+                last_save_tick = last_frame_tick;
+            }
         }
-
-        // Pace every emulated DS frame. With frame skipping enabled, pacing
-        // only presented frames would allow the game clock to run too fast.
-        const unsigned long elapsed = tb_diff_usec(mftb(), last_frame_tick);
-        if (elapsed < kTargetFrameMicroseconds)
-            udelay(static_cast<int>(kTargetFrameMicroseconds - elapsed));
-        last_frame_tick = mftb();
-
-        if (++frames_since_save >= 300) {
-            core->cartridgeNds.writeSave();
-            frames_since_save = 0;
+        else if (scheduler_returns_without_frame < kSchedulerReturnLimit) {
+            ++scheduler_returns_without_frame;
         }
 
         const std::uint32_t unknown_opcodes =
             core->interpreter[0].unknownOpcodeCount +
             core->interpreter[1].unknownOpcodeCount;
+        const bool scheduler_stalled =
+            scheduler_returns_without_frame >= kSchedulerReturnLimit &&
+            tb_diff_usec(mftb(), last_completed_tick) >=
+                kFrameProgressTimeoutMicroseconds;
         if (unknown_opcodes >= kUnknownOpcodeLimit ||
-            (!saw_content && blank_frames >= kBlankFrameLimit)) {
+            scheduler_stalled ||
+            completed_without_video > kVideoHandoffLimit ||
+            completed_without_submission > kVideoSubmissionLimit) {
             xenonds::xenon::wait_for_noods_video();
             std::printf("\nCore startup diagnostic:\n");
             std::printf("ARM9 PC=%08X opcode=%08X unknown=%u\n",
@@ -311,7 +532,11 @@ int main() {
             delete core;
             fail(unknown_opcodes >= kUnknownOpcodeLimit
                      ? "The emulated CPUs encountered invalid instructions"
-                     : "The game produced only blank frames during startup");
+                     : (scheduler_stalled
+                            ? "The DS frame scheduler stopped making progress"
+                        : (completed_without_video > kVideoHandoffLimit
+                            ? "Video handoffs stopped while DS frames continued"
+                            : "The video worker stopped accepting frames")));
             return 1;
         }
 
