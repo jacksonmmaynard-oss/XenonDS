@@ -113,6 +113,8 @@ jobs:
     needs: [host-tests, noods-core-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: write
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -143,6 +145,43 @@ jobs:
           grep -a -q 'v0.9.1' platform/xenon/release-noods/XenonDS/xenonds-core.elf32
           (cd platform/xenon/release-noods && sha256sum -c SHA256SUMS)
           tar -tzf platform/xenon/XenonDS-v0.9.1-source.tar.gz | grep -q '^XenonDS-v0.9.1/BUILD_PROVENANCE.txt$'
+
+      - name: Package v0.9.1 release downloads
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          (cd platform/xenon/release-noods && zip -X -r "$GITHUB_WORKSPACE/XenonDS-v0.9.1-USB.zip" .)
+          zip -X -j XenonDS-v0.9.1-symbols.zip \
+            platform/xenon/xenonds-noods.elf \
+            platform/xenon/build-noods/xenonds-noods.elf.map
+          sha256sum \
+            XenonDS-v0.9.1-USB.zip \
+            XenonDS-v0.9.1-symbols.zip \
+            platform/xenon/XenonDS-v0.9.1-source.tar.gz \
+            > XenonDS-v0.9.1-SHA256SUMS.txt
+
+      - name: Publish v0.9.1 prerelease
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.9.1 >/dev/null 2>&1; then
+            gh release edit v0.9.1 \
+              --target "$GITHUB_SHA" \
+              --title "XenonDS v0.9.1 - Validated Turbo Build" \
+              --notes-file docs/releases/v0.9.1.md \
+              --prerelease
+          else
+            gh release create v0.9.1 \
+              --target "$GITHUB_SHA" \
+              --title "XenonDS v0.9.1 - Validated Turbo Build" \
+              --notes-file docs/releases/v0.9.1.md \
+              --prerelease
+          fi
+          gh release upload v0.9.1 --clobber \
+            XenonDS-v0.9.1-USB.zip \
+            XenonDS-v0.9.1-symbols.zip \
+            platform/xenon/XenonDS-v0.9.1-source.tar.gz \
+            XenonDS-v0.9.1-SHA256SUMS.txt
 
       - name: Upload USB-ready v0.9.1 runtime
         uses: actions/upload-artifact@v4

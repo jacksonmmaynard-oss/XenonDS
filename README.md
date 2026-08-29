@@ -10,12 +10,27 @@ emulation cores adapted for the Xbox 360.
 
 > **Project status:** Experimental. XenonDS now boots a retail Nintendo DS game
 > on real Xbox 360 hardware with animated dual-screen video, controller input,
-> touch input, and persistent cartridge saves. The v0.9.1 release candidate
+> touch input, and persistent cartridge saves. The v0.9.1 prerelease
 > fixes the white-screen/0-FPS timing regression, adds validated frame-boundary
 > Turbo rendering, separates emulation and video-rate reporting, keeps live
 > display controls, and improves Xenon scheduling, presentation, and multicore
 > software 3D.
 > Audio, a ROM browser, and broad compatibility testing are not included yet.
+
+## Download and install
+
+Download the current [XenonDS v0.9.1 USB build](https://github.com/jacksonmmaynard-oss/XenonDS/releases/download/v0.9.1/XenonDS-v0.9.1-USB.zip).
+
+1. Back up any existing `XenonDS/game.sav`.
+2. Extract the ZIP directly to the root of a FAT32 USB drive.
+3. Add your legally dumped ROM as `XenonDS/game.nds`.
+4. Boot XeLL and press **A** at the XenonDS loader prompt.
+
+Keep `xenon.elf` in the USB root and
+`XenonDS/xenonds-core.elf32` inside the `XenonDS` folder. Press **LT** to
+toggle uncapped Turbo and **R3** to open or close picture settings. See the
+[v0.9.1 release notes](docs/releases/v0.9.1.md) for the complete controls,
+upgrade notes, validation, and known limitations.
 
 ## Hardware demo
 
@@ -91,7 +106,7 @@ Running the resulting `.elf32` file requires a homebrew-capable Xbox 360 and
 XeLL. Copy only a legally dumped `.nds` image to the USB drive; this milestone
 inspects metadata and does not execute the game yet.
 
-## NooDS v0.9.1 validated Turbo build
+## NooDS v0.9.1 Turbo build
 
 The current Xbox target uses a pinned and patched NooDS core. It boots the first valid
 `.nds` file found in `XenonDS/`, `xenonds/`, or the root of a mounted FAT
